@@ -59,7 +59,7 @@ export default function HomePage() {
   const handleCall = useCallback(async () => {
     if (!localStreamRef.current) await startLocalStream();
 
-    const targetId = "ADMIN_USER_ID"; // nastav reálne admin ID
+    const targetId = "user_30p94nuw9O2UHOEsXmDhV2SgP8N"; // nastav reálne admin ID
     const newPc = createPeerConnection(localStreamRef.current!, targetId, (stream) => {
       if (remoteVideoRef.current) {
         remoteVideoRef.current.srcObject = stream;
