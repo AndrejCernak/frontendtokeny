@@ -1,14 +1,15 @@
 importScripts('https://www.gstatic.com/firebasejs/9.22.0/firebase-app-compat.js');
 importScripts('https://www.gstatic.com/firebasejs/9.22.0/firebase-messaging-compat.js');
 
-firebase.initializeApp({
-  apiKey: "YOUR_API_KEY",
-  authDomain: "YOUR_PROJECT_ID.firebaseapp.com",
-  projectId: "YOUR_PROJECT_ID",
-  storageBucket: "YOUR_PROJECT_ID.appspot.com",
-  messagingSenderId: "YOUR_MESSAGING_SENDER_ID",
-  appId: "YOUR_APP_ID",
-});
+const firebaseConfig = {
+  apiKey: "AIzaSyAQJj_0HpQsySQDfYFwlXNQqBph3B6yJ_4",
+  authDomain: "tokeny-246df.firebaseapp.com",
+  projectId: "tokeny-246df",
+  storageBucket: "tokeny-246df.firebasestorage.app",
+  messagingSenderId: "410206660442",
+  appId: "1:410206660442:web:c6b530a5cf6ec5a9e77563",
+  measurementId: "G-QB2EJ0JFZL"
+};
 
 const messaging = firebase.messaging();
 
