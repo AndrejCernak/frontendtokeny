@@ -1,59 +1,62 @@
 "use client";
 
 import { useUser, SignedIn, SignedOut, SignInButton, UserButton } from "@clerk/nextjs";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, useCallback } from "react";
 import { requestFcmToken } from "@/lib/firebase";
 import { connectWS, sendWS } from "@/lib/wsClient";
 import { createPeerConnection } from "@/lib/webrtc";
 
+type IncomingCall = {
+  from: string;
+  callerName: string;
+};
+
 export default function HomePage() {
   const { user, isSignedIn } = useUser();
-  const [incomingCall, setIncomingCall] = useState<{ from: string; callerName: string } | null>(null);
+  const [incomingCall, setIncomingCall] = useState<IncomingCall | null>(null);
   const [pc, setPc] = useState<RTCPeerConnection | null>(null);
   const localVideoRef = useRef<HTMLVideoElement>(null);
   const remoteVideoRef = useRef<HTMLVideoElement>(null);
   const localStreamRef = useRef<MediaStream | null>(null);
 
-  useEffect(() => {
-    if (isSignedIn && user) {
-      const role = (user.publicMetadata.role as string) || "client";
-
-      connectWS(user.id, role, async (msg) => {
-        if (msg.type === "incoming-call") {
-          setIncomingCall({ from: msg.from, callerName: msg.callerName });
-        }
-        if (msg.type === "webrtc-offer") {
-          await handleOffer(msg.offer, msg.from);
-        }
-        if (msg.type === "webrtc-answer") {
-          await pc?.setRemoteDescription(new RTCSessionDescription(msg.answer));
-        }
-        if (msg.type === "webrtc-candidate") {
-          await pc?.addIceCandidate(new RTCIceCandidate(msg.candidate));
-        }
-      });
-
-      requestFcmToken().then(token => {
-        if (token) {
-          fetch(`${process.env.NEXT_PUBLIC_BACKEND_URL}/register-fcm`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ userId: user.id, fcmToken: token, role }),
-          });
-        }
-      });
-    }
-  }, [isSignedIn, user]);
-
-  const startLocalStream = async () => {
+  const startLocalStream = useCallback(async () => {
     localStreamRef.current = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
     if (localVideoRef.current && localStreamRef.current) {
       localVideoRef.current.srcObject = localStreamRef.current;
       await localVideoRef.current.play();
     }
-  };
+  }, []);
 
-  const handleCall = async () => {
+  const handleOffer = useCallback(
+    async (offer: RTCSessionDescriptionInit, from: string) => {
+      await handleAccept(from);
+      await pc?.setRemoteDescription(new RTCSessionDescription(offer));
+      const answer = await pc?.createAnswer();
+      if (answer) {
+        await pc?.setLocalDescription(answer);
+        sendWS({ type: "webrtc-answer", targetId: from, answer });
+      }
+    },
+    [pc]
+  );
+
+  const handleAccept = useCallback(
+    async (targetId: string) => {
+      if (!localStreamRef.current) await startLocalStream();
+
+      const newPc = createPeerConnection(localStreamRef.current!, targetId, (stream) => {
+        if (remoteVideoRef.current) {
+          remoteVideoRef.current.srcObject = stream;
+          remoteVideoRef.current.play();
+        }
+      });
+
+      setPc(newPc);
+    },
+    [startLocalStream]
+  );
+
+  const handleCall = useCallback(async () => {
     if (!localStreamRef.current) await startLocalStream();
 
     const targetId = "ADMIN_USER_ID"; // nastav reálne admin ID
@@ -71,28 +74,38 @@ export default function HomePage() {
 
     sendWS({ type: "call-request", targetId, callerName: user?.fullName || "Neznámy" });
     sendWS({ type: "webrtc-offer", targetId, offer });
-  };
+  }, [startLocalStream, user]);
 
-  const handleAccept = async () => {
-    if (!localStreamRef.current) await startLocalStream();
+  useEffect(() => {
+    if (isSignedIn && user) {
+      const role = (user.publicMetadata.role as string) || "client";
 
-    const newPc = createPeerConnection(localStreamRef.current!, incomingCall!.from, (stream) => {
-      if (remoteVideoRef.current) {
-        remoteVideoRef.current.srcObject = stream;
-        remoteVideoRef.current.play();
-      }
-    });
+      connectWS(user.id, role, async (msg) => {
+        if (msg.type === "incoming-call") {
+          setIncomingCall({ from: msg.from as string, callerName: msg.callerName as string });
+        }
+        if (msg.type === "webrtc-offer") {
+          await handleOffer(msg.offer as RTCSessionDescriptionInit, msg.from as string);
+        }
+        if (msg.type === "webrtc-answer") {
+          await pc?.setRemoteDescription(new RTCSessionDescription(msg.answer as RTCSessionDescriptionInit));
+        }
+        if (msg.type === "webrtc-candidate") {
+          await pc?.addIceCandidate(new RTCIceCandidate(msg.candidate as RTCIceCandidateInit));
+        }
+      });
 
-    setPc(newPc);
-  };
-
-  const handleOffer = async (offer: RTCSessionDescriptionInit, from: string) => {
-    await handleAccept();
-    await pc?.setRemoteDescription(new RTCSessionDescription(offer));
-    const answer = await pc?.createAnswer();
-    await pc?.setLocalDescription(answer!);
-    sendWS({ type: "webrtc-answer", targetId: from, answer });
-  };
+      requestFcmToken().then(token => {
+        if (token) {
+          fetch(`${process.env.NEXT_PUBLIC_BACKEND_URL}/register-fcm`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ userId: user.id, fcmToken: token, role }),
+          });
+        }
+      });
+    }
+  }, [isSignedIn, user, handleOffer, pc]);
 
   return (
     <main className="p-4">
@@ -115,7 +128,7 @@ export default function HomePage() {
         {user?.publicMetadata.role === "admin" && incomingCall && (
           <div className="bg-yellow-200 p-4 rounded mt-4">
             📞 Volá ti: {incomingCall.callerName}
-            <button className="bg-blue-500 text-white px-4 py-2 rounded ml-2" onClick={handleAccept}>
+            <button className="bg-blue-500 text-white px-4 py-2 rounded ml-2" onClick={() => handleAccept(incomingCall.from)}>
               Prijať
             </button>
           </div>
