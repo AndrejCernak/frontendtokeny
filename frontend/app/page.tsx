@@ -14,10 +14,12 @@ type IncomingCall = {
 export default function HomePage() {
   const { user, isSignedIn } = useUser();
   const [incomingCall, setIncomingCall] = useState<IncomingCall | null>(null);
-  const [pc, setPc] = useState<RTCPeerConnection | null>(null);
+  const [, setPc] = useState<RTCPeerConnection | null>(null);
   const localVideoRef = useRef<HTMLVideoElement>(null);
   const remoteVideoRef = useRef<HTMLVideoElement>(null);
   const localStreamRef = useRef<MediaStream | null>(null);
+  const pcRef = useRef<RTCPeerConnection | null>(null);
+  const offerRef = useRef<{ offer: RTCSessionDescriptionInit; from: string } | null>(null);
 
   const startLocalStream = useCallback(async () => {
     localStreamRef.current = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
@@ -27,18 +29,14 @@ export default function HomePage() {
     }
   }, []);
 
-  const handleOffer = useCallback(
-    async (offer: RTCSessionDescriptionInit, from: string) => {
-      await handleAccept(from);
-      await pc?.setRemoteDescription(new RTCSessionDescription(offer));
-      const answer = await pc?.createAnswer();
-      if (answer) {
-        await pc?.setLocalDescription(answer);
-        sendWS({ type: "webrtc-answer", targetId: from, answer });
-      }
-    },
-    [pc]
-  );
+  const processOffer = useCallback(async () => {
+    if (pcRef.current && offerRef.current) {
+      await pcRef.current.setRemoteDescription(new RTCSessionDescription(offerRef.current.offer));
+      const answer = await pcRef.current.createAnswer();
+      await pcRef.current.setLocalDescription(answer);
+      sendWS({ type: "webrtc-answer", targetId: offerRef.current.from, answer });
+    }
+  }, []);
 
   const handleAccept = useCallback(
     async (targetId: string) => {
@@ -51,9 +49,12 @@ export default function HomePage() {
         }
       });
 
+      pcRef.current = newPc;
       setPc(newPc);
+
+      await processOffer();
     },
-    [startLocalStream]
+    [startLocalStream, processOffer]
   );
 
   const handleCall = useCallback(async () => {
@@ -67,6 +68,7 @@ export default function HomePage() {
       }
     });
 
+    pcRef.current = newPc;
     setPc(newPc);
 
     const offer = await newPc.createOffer();
@@ -85,13 +87,15 @@ export default function HomePage() {
           setIncomingCall({ from: msg.from as string, callerName: msg.callerName as string });
         }
         if (msg.type === "webrtc-offer") {
-          await handleOffer(msg.offer as RTCSessionDescriptionInit, msg.from as string);
+          offerRef.current = { offer: msg.offer as RTCSessionDescriptionInit, from: msg.from as string };
+          setIncomingCall({ from: msg.from as string, callerName: msg.callerName as string });
+          await processOffer();
         }
         if (msg.type === "webrtc-answer") {
-          await pc?.setRemoteDescription(new RTCSessionDescription(msg.answer as RTCSessionDescriptionInit));
+          await pcRef.current?.setRemoteDescription(new RTCSessionDescription(msg.answer as RTCSessionDescriptionInit));
         }
         if (msg.type === "webrtc-candidate") {
-          await pc?.addIceCandidate(new RTCIceCandidate(msg.candidate as RTCIceCandidateInit));
+          await pcRef.current?.addIceCandidate(new RTCIceCandidate(msg.candidate as RTCIceCandidateInit));
         }
       });
 
@@ -105,7 +109,7 @@ export default function HomePage() {
         }
       });
     }
-  }, [isSignedIn, user, handleOffer, pc]);
+  }, [isSignedIn, user, processOffer]);
 
   return (
     <main className="p-4">
