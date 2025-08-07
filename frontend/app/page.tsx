@@ -19,6 +19,11 @@ export default function HomePage() {
   const localVideoRef = useRef<HTMLVideoElement>(null);
   const remoteVideoRef = useRef<HTMLVideoElement>(null);
   const localStreamRef = useRef<MediaStream | null>(null);
+  const [pendingOffer, setPendingOffer] = useState<{
+  offer: RTCSessionDescriptionInit;
+  from: string;
+} | null>(null);
+
 
   const startLocalStream = useCallback(async () => {
     localStreamRef.current = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
@@ -62,34 +67,33 @@ export default function HomePage() {
     }
   }, [user]);
 
-  const handleOffer = useCallback(
-    async (offer: RTCSessionDescriptionInit, from: string) => {
-      await handleAccept(from);
-      await pc?.setRemoteDescription(new RTCSessionDescription(offer));
-      const answer = await pc?.createAnswer();
-      if (answer) {
-        await pc?.setLocalDescription(answer);
-        sendWS({ type: "webrtc-answer", targetId: from, answer });
-      }
-    },
-    [pc]
-  );
+ 
 
   const handleAccept = useCallback(
-    async (targetId: string) => {
-      if (!localStreamRef.current) await startLocalStream();
+  async (targetId: string) => {
+    if (!localStreamRef.current) await startLocalStream();
 
-      const newPc = createPeerConnection(localStreamRef.current!, targetId, (stream) => {
-        if (remoteVideoRef.current) {
-          remoteVideoRef.current.srcObject = stream;
-          remoteVideoRef.current.play();
-        }
-      });
+    const newPc = createPeerConnection(localStreamRef.current!, targetId, (stream) => {
+      if (remoteVideoRef.current) {
+        remoteVideoRef.current.srcObject = stream;
+        remoteVideoRef.current.play();
+      }
+    });
 
-      setPc(newPc);
-    },
-    [startLocalStream]
-  );
+    setPc(newPc);
+
+    // 🔁 Ak máme čakajúci offer, spracuj ho teraz
+    if (pendingOffer && pendingOffer.from === targetId) {
+      await newPc.setRemoteDescription(new RTCSessionDescription(pendingOffer.offer));
+      const answer = await newPc.createAnswer();
+      await newPc.setLocalDescription(answer);
+      sendWS({ type: "webrtc-answer", targetId, answer });
+      setPendingOffer(null); // vymaž ponuku po spracovaní
+    }
+  },
+  [startLocalStream, pendingOffer]
+);
+
 
   const handleCall = useCallback(async () => {
     if (!localStreamRef.current) await startLocalStream();
@@ -120,8 +124,18 @@ export default function HomePage() {
           setIncomingCall({ from: msg.callerId as string, callerName: msg.callerName as string });
         }
         if (msg.type === "webrtc-offer") {
-          await handleOffer(msg.offer as RTCSessionDescriptionInit, msg.callerId as string);
-        }
+  // Ak ešte nie je pripravený PeerConnection (t.j. admin ešte neklikol "Prijať")
+  if (!pc) {
+    setPendingOffer({ offer: msg.offer as RTCSessionDescriptionInit, from: msg.callerId as string }); // 🔁 Ulož offer
+  } else {
+    // Ak už PC existuje, spracuj priamo
+    await pc.setRemoteDescription(new RTCSessionDescription(msg.offer as RTCSessionDescriptionInit));
+    const answer = await pc.createAnswer();
+    await pc.setLocalDescription(answer);
+    sendWS({ type: "webrtc-answer", targetId: msg.callerId, answer });
+  }
+}
+
         if (msg.type === "webrtc-answer") {
           await pc?.setRemoteDescription(new RTCSessionDescription(msg.answer as RTCSessionDescriptionInit));
         }
@@ -133,7 +147,7 @@ export default function HomePage() {
       // ❌ zmaž túto časť, lebo token sa teraz posiela iba po kliknutí
       // requestFcmToken().then(...)
     }
-  }, [isSignedIn, user, handleOffer, pc]);
+  }, [isSignedIn, user, pc]);
 
   return (
     <main className="p-4">
