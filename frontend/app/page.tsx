@@ -15,6 +15,7 @@ export default function HomePage() {
   const { user, isSignedIn } = useUser();
   const [incomingCall, setIncomingCall] = useState<IncomingCall | null>(null);
   const [pc, setPc] = useState<RTCPeerConnection | null>(null);
+    const [hasNotifications, setHasNotifications] = useState(false); // 🔔
   const localVideoRef = useRef<HTMLVideoElement>(null);
   const remoteVideoRef = useRef<HTMLVideoElement>(null);
   const localStreamRef = useRef<MediaStream | null>(null);
@@ -26,6 +27,40 @@ export default function HomePage() {
       await localVideoRef.current.play();
     }
   }, []);
+
+  const handleEnableNotifications = useCallback(async () => {
+    try {
+      const permission = await Notification.requestPermission();
+      if (permission !== "granted") {
+        alert("Notifikácie neboli povolené.");
+        return;
+      }
+
+      const token = await requestFcmToken();
+      if (!token || !user) {
+        alert("Nepodarilo sa získať FCM token.");
+        return;
+      }
+
+      const role = (user.publicMetadata.role as string) || "client";
+
+      const res = await fetch(`${process.env.NEXT_PUBLIC_BACKEND_URL}/register-fcm`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ userId: user.id, fcmToken: token, role }),
+      });
+
+      if (res.ok) {
+        alert("Notifikácie boli povolené ✅");
+        setHasNotifications(true);
+      } else {
+        alert("Chyba pri registrácii tokenu.");
+      }
+    } catch (err) {
+      console.error("FCM chyba:", err);
+      alert("Nastala chyba pri nastavovaní notifikácií.");
+    }
+  }, [user]);
 
   const handleOffer = useCallback(
     async (offer: RTCSessionDescriptionInit, from: string) => {
@@ -82,10 +117,10 @@ export default function HomePage() {
 
       connectWS(user.id, role, async (msg) => {
         if (msg.type === "incoming-call") {
-          setIncomingCall({ from: msg.from as string, callerName: msg.callerName as string });
+          setIncomingCall({ from: msg.callerId as string, callerName: msg.callerName as string });
         }
         if (msg.type === "webrtc-offer") {
-          await handleOffer(msg.offer as RTCSessionDescriptionInit, msg.from as string);
+          await handleOffer(msg.offer as RTCSessionDescriptionInit, msg.callerId as string);
         }
         if (msg.type === "webrtc-answer") {
           await pc?.setRemoteDescription(new RTCSessionDescription(msg.answer as RTCSessionDescriptionInit));
@@ -95,15 +130,8 @@ export default function HomePage() {
         }
       });
 
-      requestFcmToken().then(token => {
-        if (token) {
-          fetch(`${process.env.NEXT_PUBLIC_BACKEND_URL}/register-fcm`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ userId: user.id, fcmToken: token, role }),
-          });
-        }
-      });
+      // ❌ zmaž túto časť, lebo token sa teraz posiela iba po kliknutí
+      // requestFcmToken().then(...)
     }
   }, [isSignedIn, user, handleOffer, pc]);
 
@@ -115,6 +143,13 @@ export default function HomePage() {
       <SignedIn>
         <UserButton />
         <h1>Hello {user?.firstName}</h1>
+
+        {/* 🔔 Zapnúť notifikácie manuálne */}
+        {!hasNotifications && (
+          <button className="bg-blue-600 text-white px-4 py-2 rounded mb-4" onClick={handleEnableNotifications}>
+            Povoliť notifikácie
+          </button>
+        )}
 
         <video ref={localVideoRef} autoPlay playsInline muted className="w-1/2 border" />
         <video ref={remoteVideoRef} autoPlay playsInline className="w-1/2 border" />
