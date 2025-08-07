@@ -1,5 +1,5 @@
-importScripts('https://www.gstatic.com/firebasejs/9.22.0/firebase-app-compat.js');
-importScripts('https://www.gstatic.com/firebasejs/9.22.0/firebase-messaging-compat.js');
+importScripts('https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js');
+importScripts('https://www.gstatic.com/firebasejs/10.12.2/firebase-messaging-compat.js');
 
 const firebaseConfig = {
   apiKey: "AIzaSyAQJj_0HpQsySQDfYFwlXNQqBph3B6yJ_4",
@@ -11,9 +11,13 @@ const firebaseConfig = {
   measurementId: "G-QB2EJ0JFZL"
 };
 
+// ❗️ DÔLEŽITÉ: Inicializuj Firebase, inak `messaging()` nefunguje
+firebase.initializeApp(firebaseConfig);
+
 const messaging = firebase.messaging();
 
 messaging.onBackgroundMessage(function (payload) {
+  console.log('[firebase-messaging-sw.js] Background message received:', payload);
   self.registration.showNotification(payload.notification.title, {
     body: payload.notification.body,
   });
