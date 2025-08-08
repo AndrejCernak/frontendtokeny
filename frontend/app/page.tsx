@@ -137,8 +137,23 @@ export default function HomePage() {
 }
 
         if (msg.type === "webrtc-answer") {
-          await pc?.setRemoteDescription(new RTCSessionDescription(msg.answer as RTCSessionDescriptionInit));
-        }
+  console.log("📩 Dostali sme webrtc-answer:", msg);
+  if (!pc) {
+    console.warn("⚠️ PeerConnection neexistuje, vytváram ho znova!");
+    await startLocalStream();
+    const newPc = createPeerConnection(localStreamRef.current!, msg.callerId as string, (stream) => {
+      if (remoteVideoRef.current) {
+        remoteVideoRef.current.srcObject = stream;
+        remoteVideoRef.current.play();
+      }
+    });
+    setPc(newPc);
+    await newPc.setRemoteDescription(new RTCSessionDescription(msg.answer as RTCSessionDescriptionInit));
+  } else {
+    await pc.setRemoteDescription(new RTCSessionDescription(msg.answer as RTCSessionDescriptionInit));
+  }
+}
+
         if (msg.type === "webrtc-candidate") {
           await pc?.addIceCandidate(new RTCIceCandidate(msg.candidate as RTCIceCandidateInit));
         }
