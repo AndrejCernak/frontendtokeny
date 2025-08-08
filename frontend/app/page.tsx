@@ -25,13 +25,24 @@ export default function HomePage() {
 } | null>(null);
 
 
-  const startLocalStream = useCallback(async () => {
+ const startLocalStream = useCallback(async () => {
+  try {
     localStreamRef.current = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+
     if (localVideoRef.current && localStreamRef.current) {
       localVideoRef.current.srcObject = localStreamRef.current;
-      await localVideoRef.current.play();
+      setTimeout(() => {
+        localVideoRef.current?.play().catch((err) => {
+          console.warn("❌ local video play error:", err);
+        });
+      }, 0);
     }
-  }, []);
+
+    console.log("🎥 Local stream získaný:", localStreamRef.current?.getTracks());
+  } catch (err) {
+    console.error("❌ Chyba pri získavaní kamery/mikrofónu:", err);
+  }
+}, []);
 
   const handleEnableNotifications = useCallback(async () => {
     try {
@@ -136,11 +147,17 @@ export default function HomePage() {
   }
 }
 
-        if (msg.type === "webrtc-answer") {
+   if (msg.type === "webrtc-answer") {
   console.log("📩 Dostali sme webrtc-answer:", msg);
+
+  // ✅ Uisti sa, že máme local stream
+  if (!localStreamRef.current) {
+    console.warn("📹 Neexistuje local stream, štartujem");
+    await startLocalStream();
+  }
+
   if (!pc) {
     console.warn("⚠️ PeerConnection neexistuje, vytváram ho znova!");
-    await startLocalStream();
     const newPc = createPeerConnection(localStreamRef.current!, msg.callerId as string, (stream) => {
       if (remoteVideoRef.current) {
         remoteVideoRef.current.srcObject = stream;
@@ -153,6 +170,7 @@ export default function HomePage() {
     await pc.setRemoteDescription(new RTCSessionDescription(msg.answer as RTCSessionDescriptionInit));
   }
 }
+
 
         if (msg.type === "webrtc-candidate") {
           await pc?.addIceCandidate(new RTCIceCandidate(msg.candidate as RTCIceCandidateInit));
