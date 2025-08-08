@@ -112,7 +112,7 @@ export default function HomePage() {
     await newPc.setLocalDescription(offer);
 
     sendWS({ type: "call-request", targetId, callerName: user?.fullName || "Neznámy" });
-    sendWS({ type: "webrtc-offer", targetId, offer });
+    sendWS({ type: "webrtc-offer", targetId, offer, callerId: user?.id });
   }, [startLocalStream, user]);
 
   useEffect(() => {
