@@ -16,7 +16,7 @@ export default function HomePage() {
   const [incomingCall, setIncomingCall] = useState<IncomingCall | null>(null);
   const [pc, setPc] = useState<RTCPeerConnection | null>(null);
   const [hasNotifications, setHasNotifications] = useState(false);
-
+  const [isMuted, setIsMuted] = useState(false);
   const remoteAudioRef = useRef<HTMLAudioElement>(null);
   const localStreamRef = useRef<MediaStream | null>(null);
 
@@ -24,6 +24,9 @@ export default function HomePage() {
     offer: RTCSessionDescriptionInit;
     from: string;
   } | null>(null);
+
+const pendingCalls = new Map();
+const PENDING_TTL_MS = 90 * 1000; // 90 sekúnd držíme info
 
   // 🎤 len audio (bez videa)
   const startLocalStream = useCallback(async () => {
@@ -35,6 +38,14 @@ export default function HomePage() {
       alert("Nepodarilo sa získať prístup k mikrofónu.");
     }
   }, []);
+
+  const toggleMute = useCallback(() => {
+  const track = localStreamRef.current?.getAudioTracks?.()[0];
+  if (track) {
+    track.enabled = !track.enabled;
+    setIsMuted(!track.enabled ? true : false);
+  }
+}, []);
 
   const handleEnableNotifications = useCallback(async () => {
     try {
@@ -228,6 +239,12 @@ export default function HomePage() {
                   </button>
                 </div>
               )}
+              <button
+                className="px-4 py-2 rounded-xl bg-emerald-600 text-white shadow hover:bg-emerald-700 transition"
+                onClick={toggleMute}
+              >
+                {isMuted ? "Unmute" : "Mute"}
+              </button>
             </div>
 
             {/* 🔈 vzdialený audio stream */}
