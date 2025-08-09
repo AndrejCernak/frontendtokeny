@@ -15,34 +15,26 @@ export default function HomePage() {
   const { user, isSignedIn } = useUser();
   const [incomingCall, setIncomingCall] = useState<IncomingCall | null>(null);
   const [pc, setPc] = useState<RTCPeerConnection | null>(null);
-    const [hasNotifications, setHasNotifications] = useState(false); // 🔔
-  const localVideoRef = useRef<HTMLVideoElement>(null);
-  const remoteVideoRef = useRef<HTMLVideoElement>(null);
+  const [hasNotifications, setHasNotifications] = useState(false);
+
+  const remoteAudioRef = useRef<HTMLAudioElement>(null);
   const localStreamRef = useRef<MediaStream | null>(null);
+
   const [pendingOffer, setPendingOffer] = useState<{
-  offer: RTCSessionDescriptionInit;
-  from: string;
-} | null>(null);
+    offer: RTCSessionDescriptionInit;
+    from: string;
+  } | null>(null);
 
-
- const startLocalStream = useCallback(async () => {
-  try {
-    localStreamRef.current = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
-
-    if (localVideoRef.current && localStreamRef.current) {
-      localVideoRef.current.srcObject = localStreamRef.current;
-      setTimeout(() => {
-        localVideoRef.current?.play().catch((err) => {
-          console.warn("❌ local video play error:", err);
-        });
-      }, 0);
+  // 🎤 len audio (bez videa)
+  const startLocalStream = useCallback(async () => {
+    try {
+      localStreamRef.current = await navigator.mediaDevices.getUserMedia({ audio: true }); // ✅ iba mikrofón
+      console.log("🎤 Local audio tracks:", localStreamRef.current?.getTracks());
+    } catch (err) {
+      console.error("❌ Chyba pri získavaní mikrofónu:", err);
+      alert("Nepodarilo sa získať prístup k mikrofónu.");
     }
-
-    console.log("🎥 Local stream získaný:", localStreamRef.current?.getTracks());
-  } catch (err) {
-    console.error("❌ Chyba pri získavaní kamery/mikrofónu:", err);
-  }
-}, []);
+  }, []);
 
   const handleEnableNotifications = useCallback(async () => {
     try {
@@ -78,45 +70,40 @@ export default function HomePage() {
     }
   }, [user]);
 
- 
+  const attachRemoteStream = useCallback((stream: MediaStream) => {
+    if (remoteAudioRef.current) {
+      remoteAudioRef.current.srcObject = stream;
+      // prehrá sa po užívateľskej akcii (Prijať/Zavolať)
+      remoteAudioRef.current.play().catch((e) => {
+        console.warn("Audio play wait for user gesture:", e);
+      });
+    }
+  }, []);
 
   const handleAccept = useCallback(
-  async (targetId: string) => {
-    if (!localStreamRef.current) await startLocalStream();
+    async (targetId: string) => {
+      if (!localStreamRef.current) await startLocalStream();
 
-    const newPc = createPeerConnection(localStreamRef.current!, targetId, (stream) => {
-      if (remoteVideoRef.current) {
-        remoteVideoRef.current.srcObject = stream;
-        remoteVideoRef.current.play();
+      const newPc = createPeerConnection(localStreamRef.current!, targetId, attachRemoteStream);
+      setPc(newPc);
+
+      // spracuj čakajúci offer, ak je na tohto volajúceho
+      if (pendingOffer && pendingOffer.from === targetId) {
+        await newPc.setRemoteDescription(new RTCSessionDescription(pendingOffer.offer));
+        const answer = await newPc.createAnswer();
+        await newPc.setLocalDescription(answer);
+        sendWS({ type: "webrtc-answer", targetId, answer });
+        setPendingOffer(null);
       }
-    });
-
-    setPc(newPc);
-
-    // 🔁 Ak máme čakajúci offer, spracuj ho teraz
-    if (pendingOffer && pendingOffer.from === targetId) {
-      await newPc.setRemoteDescription(new RTCSessionDescription(pendingOffer.offer));
-      const answer = await newPc.createAnswer();
-      await newPc.setLocalDescription(answer);
-      sendWS({ type: "webrtc-answer", targetId, answer });
-      setPendingOffer(null); // vymaž ponuku po spracovaní
-    }
-  },
-  [startLocalStream, pendingOffer]
-);
-
+    },
+    [startLocalStream, pendingOffer, attachRemoteStream]
+  );
 
   const handleCall = useCallback(async () => {
     if (!localStreamRef.current) await startLocalStream();
 
     const targetId = "user_30p94nuw9O2UHOEsXmDhV2SgP8N"; // nastav reálne admin ID
-    const newPc = createPeerConnection(localStreamRef.current!, targetId, (stream) => {
-      if (remoteVideoRef.current) {
-        remoteVideoRef.current.srcObject = stream;
-        remoteVideoRef.current.play();
-      }
-    });
-
+    const newPc = createPeerConnection(localStreamRef.current!, targetId, attachRemoteStream);
     setPc(newPc);
 
     const offer = await newPc.createOffer();
@@ -124,7 +111,7 @@ export default function HomePage() {
 
     sendWS({ type: "call-request", targetId, callerName: user?.fullName || "Neznámy" });
     sendWS({ type: "webrtc-offer", targetId, offer, callerId: user?.id });
-  }, [startLocalStream, user]);
+  }, [startLocalStream, user, attachRemoteStream]);
 
   useEffect(() => {
     if (isSignedIn && user) {
@@ -134,88 +121,124 @@ export default function HomePage() {
         if (msg.type === "incoming-call") {
           setIncomingCall({ from: msg.callerId as string, callerName: msg.callerName as string });
         }
+
         if (msg.type === "webrtc-offer") {
-  // Ak ešte nie je pripravený PeerConnection (t.j. admin ešte neklikol "Prijať")
-  if (!pc) {
-    setPendingOffer({ offer: msg.offer as RTCSessionDescriptionInit, from: msg.callerId as string }); // 🔁 Ulož offer
-  } else {
-    // Ak už PC existuje, spracuj priamo
-    await pc.setRemoteDescription(new RTCSessionDescription(msg.offer as RTCSessionDescriptionInit));
-    const answer = await pc.createAnswer();
-    await pc.setLocalDescription(answer);
-    sendWS({ type: "webrtc-answer", targetId: msg.callerId, answer });
-  }
-}
+          if (!pc) {
+            setPendingOffer({ offer: msg.offer as RTCSessionDescriptionInit, from: msg.callerId as string });
+          } else {
+            await pc.setRemoteDescription(new RTCSessionDescription(msg.offer as RTCSessionDescriptionInit));
+            const answer = await pc.createAnswer();
+            await pc.setLocalDescription(answer);
+            sendWS({ type: "webrtc-answer", targetId: msg.callerId, answer });
+          }
+        }
 
-   if (msg.type === "webrtc-answer") {
-  console.log("📩 Dostali sme webrtc-answer:", msg);
+        if (msg.type === "webrtc-answer") {
+          console.log("📩 Dostali sme webrtc-answer:", msg);
 
-  // ✅ Uisti sa, že máme local stream
-  if (!localStreamRef.current) {
-    console.warn("📹 Neexistuje local stream, štartujem");
-    await startLocalStream();
-  }
+          if (!localStreamRef.current) {
+            await startLocalStream();
+          }
 
-  if (!pc) {
-    console.warn("⚠️ PeerConnection neexistuje, vytváram ho znova!");
-    const newPc = createPeerConnection(localStreamRef.current!, msg.callerId as string, (stream) => {
-      if (remoteVideoRef.current) {
-        remoteVideoRef.current.srcObject = stream;
-        remoteVideoRef.current.play();
-      }
-    });
-    setPc(newPc);
-    await newPc.setRemoteDescription(new RTCSessionDescription(msg.answer as RTCSessionDescriptionInit));
-  } else {
-    await pc.setRemoteDescription(new RTCSessionDescription(msg.answer as RTCSessionDescriptionInit));
-  }
-}
-
+          if (!pc) {
+            const newPc = createPeerConnection(localStreamRef.current!, msg.callerId as string, attachRemoteStream);
+            setPc(newPc);
+            await newPc.setRemoteDescription(new RTCSessionDescription(msg.answer as RTCSessionDescriptionInit));
+          } else {
+            await pc.setRemoteDescription(new RTCSessionDescription(msg.answer as RTCSessionDescriptionInit));
+          }
+        }
 
         if (msg.type === "webrtc-candidate") {
           await pc?.addIceCandidate(new RTCIceCandidate(msg.candidate as RTCIceCandidateInit));
         }
       });
-
-      // ❌ zmaž túto časť, lebo token sa teraz posiela iba po kliknutí
-      // requestFcmToken().then(...)
     }
-  }, [isSignedIn, user, pc]);
+  }, [isSignedIn, user, pc, startLocalStream, attachRemoteStream]);
 
   return (
-    <main className="p-4">
-      <SignedOut>
-        <SignInButton />
-      </SignedOut>
-      <SignedIn>
-        <UserButton />
-        <h1>Hello {user?.firstName}</h1>
-
-        {/* 🔔 Zapnúť notifikácie manuálne */}
-        {!hasNotifications && (
-          <button className="bg-blue-600 text-white px-4 py-2 rounded mb-4" onClick={handleEnableNotifications}>
-            Povoliť notifikácie
-          </button>
-        )}
-
-        <video ref={localVideoRef} autoPlay playsInline muted className="w-1/2 border" />
-        <video ref={remoteVideoRef} autoPlay playsInline className="w-1/2 border" />
-
-        {user?.publicMetadata.role === "client" && (
-          <button className="bg-green-500 text-white px-4 py-2 rounded" onClick={handleCall}>
-            Zavolať
-          </button>
-        )}
-
-        {user?.publicMetadata.role === "admin" && incomingCall && (
-          <div className="bg-yellow-200 p-4 rounded mt-4">
-            📞 Volá ti: {incomingCall.callerName}
-            <button className="bg-blue-500 text-white px-4 py-2 rounded ml-2" onClick={() => handleAccept(incomingCall.from)}>
-              Prijať
-            </button>
+    <main className="min-h-screen bg-gradient-to-br from-stone-100 via-emerald-50 to-amber-50 text-stone-800">
+      <div className="max-w-3xl mx-auto p-6">
+        <header className="flex items-center justify-between mb-6">
+          <div className="flex items-center gap-3">
+            <div className="h-10 w-10 rounded-2xl bg-emerald-600/10 flex items-center justify-center shadow-inner">
+              <span className="text-emerald-700 font-bold">🔊</span>
+            </div>
+            <h1 className="text-2xl font-semibold tracking-tight">Audio hovory</h1>
           </div>
-        )}
-      </SignedIn>
+          <div className="flex items-center gap-3">
+            <SignedOut>
+              <SignInButton />
+            </SignedOut>
+            <SignedIn>
+              <UserButton />
+            </SignedIn>
+          </div>
+        </header>
+
+        <SignedIn>
+          <section className="rounded-2xl bg-white/80 backdrop-blur shadow-sm border border-stone-200 p-5 mb-5">
+            <div className="flex items-center justify-between flex-wrap gap-3">
+              <div>
+                <p className="text-sm text-stone-500">Prihlásený používateľ</p>
+                <p className="font-medium">{user?.fullName}</p>
+              </div>
+
+              {!hasNotifications && (
+                <button
+                  className="px-4 py-2 rounded-xl bg-emerald-600 text-white shadow hover:bg-emerald-700 transition"
+                  onClick={handleEnableNotifications}
+                >
+                  Povoliť notifikácie
+                </button>
+              )}
+            </div>
+          </section>
+
+          <section className="rounded-2xl bg-white/80 backdrop-blur shadow-sm border border-stone-200 p-6">
+            <div className="flex items-center justify-between gap-4 flex-wrap">
+              <div className="flex-1">
+                <h2 className="text-lg font-semibold mb-1">Stav hovoru</h2>
+                <p className="text-stone-600 text-sm">
+                  {incomingCall
+                    ? `Prichádzajúci hovor od: ${incomingCall.callerName}`
+                    : "Pripravený na hovor"}
+                </p>
+              </div>
+
+              {user?.publicMetadata.role === "client" && (
+                <button
+                  className="px-5 py-3 rounded-xl bg-emerald-600 text-white font-medium shadow hover:bg-emerald-700 transition"
+                  onClick={handleCall}
+                >
+                  Zavolať
+                </button>
+              )}
+
+              {user?.publicMetadata.role === "admin" && incomingCall && (
+                <div className="flex items-center gap-3">
+                  <div className="px-3 py-2 rounded-xl bg-amber-100 text-amber-800 font-medium">
+                    📞 Volá: {incomingCall.callerName}
+                  </div>
+                  <button
+                    className="px-5 py-3 rounded-xl bg-emerald-600 text-white font-medium shadow hover:bg-emerald-700 transition"
+                    onClick={() => handleAccept(incomingCall.from)}
+                  >
+                    Prijať
+                  </button>
+                </div>
+              )}
+            </div>
+
+            {/* 🔈 vzdialený audio stream */}
+            <audio ref={remoteAudioRef} autoPlay playsInline className="hidden" />
+          </section>
+
+          <p className="text-xs text-stone-500 mt-4">
+            Tip: Ak nič nepočuť, skontroluj povolenia mikrofónu v prehliadači a systémové nastavenia výstupného zvuku.
+          </p>
+        </SignedIn>
+      </div>
     </main>
   );
 }
