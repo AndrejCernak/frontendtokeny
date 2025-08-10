@@ -24,7 +24,6 @@ export default function HomePage() {
   const [pc, setPc] = useState<RTCPeerConnection | null>(null);
   const [hasNotifications, setHasNotifications] = useState(false);
   const [isMuted, setIsMuted] = useState(false);
-  
 
   const [secondsRemaining, setSecondsRemaining] = useState<number>(0);
   const [inCall, setInCall] = useState(false);
