@@ -19,6 +19,7 @@ function formatSeconds(s: number) {
 
 export default function HomePage() {
   const { user, isSignedIn } = useUser();
+  const role = (user?.publicMetadata.role as string) || "client";
 
   const [incomingCall, setIncomingCall] = useState<IncomingCall | null>(null);
   const [pc, setPc] = useState<RTCPeerConnection | null>(null);
@@ -325,12 +326,14 @@ export default function HomePage() {
                     Povoliť notifikácie
                   </button>
                 )}
-                <button
-                  onClick={handlePurchaseMvp}
-                  className="px-4 py-2 rounded-xl bg-amber-500 text-white shadow hover:bg-amber-600 transition"
-                >
-                  Kúpiť 30 min (225 €)
-                </button>
+                {role !== "admin" && (
+                  <button
+                    onClick={handlePurchaseMvp}
+                    className="px-4 py-2 rounded-xl bg-amber-500 text-white shadow hover:bg-amber-600 transition"
+                  >
+                    Kúpiť 30 min (225 €)
+                  </button>
+                )}
               </div>
             </div>
           </section>
