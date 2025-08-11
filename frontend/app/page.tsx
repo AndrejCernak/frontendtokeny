@@ -1,15 +1,12 @@
 "use client";
 
 import { useUser, SignedIn, SignedOut, SignInButton, UserButton } from "@clerk/nextjs";
-import { useEffect, useRef, useState, useCallback } from "react";
+import { useEffect, useRef, useState, useCallback, useMemo } from "react";
 import { requestFcmToken } from "@/lib/firebase";
 import { connectWS, sendWS } from "@/lib/wsClient";
 import { createPeerConnection } from "@/lib/webrtc";
 
-type IncomingCall = {
-  from: string;
-  callerName: string;
-};
+type IncomingCall = { from: string; callerName: string };
 
 function formatSeconds(s: number) {
   const m = Math.floor(s / 60);
@@ -17,46 +14,62 @@ function formatSeconds(s: number) {
   return `${m} min ${sec}s`;
 }
 
+function isFridayInBratislava(d = new Date()) {
+  const local = new Date(d.toLocaleString("en-US", { timeZone: "Europe/Bratislava" }));
+  return local.getDay() === 5; // 0=Sun ... 5=Fri
+}
+
 export default function HomePage() {
   const { user, isSignedIn } = useUser();
   const role = (user?.publicMetadata.role as string) || "client";
 
+  // ——— Call state
   const [incomingCall, setIncomingCall] = useState<IncomingCall | null>(null);
   const [pc, setPc] = useState<RTCPeerConnection | null>(null);
   const [hasNotifications, setHasNotifications] = useState(false);
   const [isMuted, setIsMuted] = useState(false);
-
-  const [secondsRemaining, setSecondsRemaining] = useState<number>(0);
   const [inCall, setInCall] = useState(false);
 
+  // ——— Balances
+  const [secondsRemaining, setSecondsRemaining] = useState<number>(0); // non-Friday credit
+  const [fridayMinutesRemaining, setFridayMinutesRemaining] = useState<number>(0); // Friday tokens credit (minutes)
+  const isFriday = useMemo(() => isFridayInBratislava(), []);
+
+  // ——— Media/WS helpers
   const remoteAudioRef = useRef<HTMLAudioElement>(null);
   const localStreamRef = useRef<MediaStream | null>(null);
-  const callTimerRef = useRef<NodeJS.Timeout | null>(null); // lokálny odpočet UI
+  const callTimerRef = useRef<NodeJS.Timeout | null>(null);
+  const peerIdRef = useRef<string | null>(null);
 
-  const [pendingOffer, setPendingOffer] = useState<{
-    offer: RTCSessionDescriptionInit;
-    from: string;
-  } | null>(null);
+  const [pendingOffer, setPendingOffer] = useState<{ offer: RTCSessionDescriptionInit; from: string } | null>(null);
 
-  // ===== Helpers =====
+  // ===== Backend helpers =====
+  const backend = process.env.NEXT_PUBLIC_BACKEND_URL!;
+  const adminId = process.env.NEXT_PUBLIC_ADMIN_ID as string; // nastav vo Verceli
+
   const fetchBalance = useCallback(async () => {
-    if (!user) return;
-    try {
-      const res = await fetch(`${process.env.NEXT_PUBLIC_BACKEND_URL}/balance/${user.id}`);
-      const data = await res.json();
-      setSecondsRemaining(data?.secondsRemaining ?? 0);
-    } catch (e) {
-      console.warn("Nepodarilo sa načítať zostatok", e);
-    }
-  }, [user]);
+    if (!user) return 0;
+    const res = await fetch(`${backend}/balance/${user.id}`);
+    const data = await res.json();
+    const s = data?.secondsRemaining ?? 0;
+    setSecondsRemaining(s);
+    return s;
+  }, [backend, user]);
+
+  const fetchFridayBalance = useCallback(async () => {
+    if (!user) return 0;
+    const res = await fetch(`${backend}/friday/balance/${user.id}`);
+    const data = await res.json();
+    const m = data?.totalMinutes ?? 0;
+    setFridayMinutesRemaining(m);
+    return m;
+  }, [backend, user]);
 
   const startLocalStream = useCallback(async () => {
     try {
       localStreamRef.current = await navigator.mediaDevices.getUserMedia({ audio: true });
-      // pri samotnom audku nič nepriraďujeme do <audio>, to je remote
-      console.log("🎤 Local audio tracks:", localStreamRef.current?.getTracks());
     } catch (err) {
-      console.error("❌ Chyba pri získavaní mikrofónu:", err);
+      console.error("❌ Mikrofón:", err);
       alert("Nepodarilo sa získať prístup k mikrofónu.");
     }
   }, []);
@@ -86,7 +99,9 @@ export default function HomePage() {
   const startUiCountdown = useCallback(() => {
     clearCallTimer();
     callTimerRef.current = setInterval(() => {
-      setSecondsRemaining((prev) => (prev > 0 ? prev - 1 : 0));
+      // UI len „tiká“; server posiela presné updaty
+      setSecondsRemaining((prev) => (prev > 0 ? prev - 1 : prev));
+      setFridayMinutesRemaining((prev) => prev); // nechávame na server push
     }, 1000);
   }, []);
 
@@ -105,16 +120,16 @@ export default function HomePage() {
         setInCall(false);
         setIsMuted(false);
 
-        // požiadaj backend o ukončenie aj druhú stranu (ak máme target)
-        if (targetId) {
-          sendWS({ type: "end-call", targetId });
-        }
+        const id = targetId ?? peerIdRef.current ?? undefined;
+        if (id) sendWS({ type: "end-call", targetId: id });
       } finally {
-        // po ukončení si doťahni presný zostatok zo servera
+        peerIdRef.current = null;
+        // refresh presných zostatkov
         await fetchBalance();
+        await fetchFridayBalance();
       }
     },
-    [pc, fetchBalance]
+    [pc, fetchBalance, fetchFridayBalance]
   );
 
   // ===== Accept / Call =====
@@ -124,6 +139,7 @@ export default function HomePage() {
 
       const newPc = createPeerConnection(localStreamRef.current!, targetId, attachRemoteStream);
       setPc(newPc);
+      peerIdRef.current = targetId;
 
       if (pendingOffer && pendingOffer.from === targetId) {
         await newPc.setRemoteDescription(new RTCSessionDescription(pendingOffer.offer));
@@ -134,24 +150,36 @@ export default function HomePage() {
       }
 
       setInCall(true);
-      startUiCountdown(); // UI odpočet – server odpočítava každých 10s; UI ide po sekundách
+      startUiCountdown();
     },
     [startLocalStream, pendingOffer, attachRemoteStream, startUiCountdown]
   );
 
   const handleCall = useCallback(async () => {
-    // rýchla kontrola zostatku pred volaním
-    await fetchBalance();
-    if (secondsRemaining <= 0) {
-      alert("Nemáš dostupné tokeny. Kúp si balík, aby si mohol volať.");
-      return;
+    if (!user) return;
+
+    // presná kontrola podľa dňa
+    if (isFriday) {
+      const m = await fetchFridayBalance();
+      if (m <= 0) {
+        alert("V piatok môžeš volať iba s piatkovými tokenmi. Skús kúpiť token alebo burzu.");
+        window.location.href = "/burza-tokenov";
+        return;
+      }
+    } else {
+      const s = await fetchBalance();
+      if (s <= 0) {
+        alert("Nemáš dostupné minúty mimo piatku. Kúp kredit alebo piatkový token (len pre piatok).");
+        return;
+      }
     }
 
     if (!localStreamRef.current) await startLocalStream();
 
-    const targetId = "user_30p94nuw9O2UHOEsXmDhV2SgP8N"; // admin ID
+    const targetId = adminId;
     const newPc = createPeerConnection(localStreamRef.current!, targetId, attachRemoteStream);
     setPc(newPc);
+    peerIdRef.current = targetId;
 
     const offer = await newPc.createOffer();
     await newPc.setLocalDescription(offer);
@@ -161,16 +189,16 @@ export default function HomePage() {
 
     setInCall(true);
     startUiCountdown();
-  }, [fetchBalance, secondsRemaining, startLocalStream, user, attachRemoteStream, startUiCountdown]);
+  }, [user, isFriday, fetchFridayBalance, fetchBalance, startLocalStream, attachRemoteStream, startUiCountdown, adminId]);
 
+  // ===== MVP kredit nákup (mimo piatok) — nechávam pre kompatibilitu
   const handlePurchaseMvp = useCallback(async () => {
     if (!user) return;
     try {
-      // 30 min = 1800 s → 1800 * 0.125 € = 225.00 € (ak 450 €/h)
-      const res = await fetch(`${process.env.NEXT_PUBLIC_BACKEND_URL}/purchase`, {
+      const res = await fetch(`${backend}/purchase`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ userId: user.id, amountEur: 225.0 }),
+        body: JSON.stringify({ userId: user.id, amountEur: 225.0 }), // 30 min
       });
       const data = await res.json();
       if (data?.success) {
@@ -179,18 +207,17 @@ export default function HomePage() {
       } else {
         alert("Nákup zlyhal.");
       }
-    } catch (e) {
+    } catch {
       alert("Chyba pri nákupe.");
     }
-  }, [user, fetchBalance]);
+  }, [backend, user, fetchBalance]);
 
   // ===== WS handling =====
   useEffect(() => {
     if (isSignedIn && user) {
-      const role = (user.publicMetadata.role as string) || "client";
-
-      // načítaj zostatok po prihlásení
+      // hneď načítaj oba zostatky
       fetchBalance();
+      fetchFridayBalance();
 
       connectWS(user.id, role, async (msg) => {
         if (msg.type === "incoming-call") {
@@ -198,19 +225,24 @@ export default function HomePage() {
         }
 
         if (msg.type === "insufficient-tokens") {
-          alert("Nemáš dostupné tokeny. Kúp si balík, aby si mohol volať.");
+          alert("Nemáš dostupný kredit. Kúp si kredit.");
           setInCall(false);
           clearCallTimer();
         }
 
+        if (msg.type === "insufficient-friday-tokens") {
+          alert("V piatok môžeš volať iba s piatkovými tokenmi. Skús kúpiť token alebo burzu.");
+          setInCall(false);
+          clearCallTimer();
+          window.location.href = "/burza-tokenov";
+        }
+
         if (msg.type === "call-started") {
-          // server potvrdil, že call je reálne spojeny
           setInCall(true);
           startUiCountdown();
         }
 
         if (msg.type === "end-call") {
-          // dôvod: "no-tokens" alebo manual
           await stopCall(msg.from as string | undefined);
         }
 
@@ -226,12 +258,11 @@ export default function HomePage() {
         }
 
         if (msg.type === "webrtc-answer") {
-          if (!localStreamRef.current) {
-            await startLocalStream();
-          }
+          if (!localStreamRef.current) await startLocalStream();
           if (!pc) {
             const newPc = createPeerConnection(localStreamRef.current!, msg.callerId as string, attachRemoteStream);
             setPc(newPc);
+            peerIdRef.current = msg.callerId as string;
             await newPc.setRemoteDescription(new RTCSessionDescription(msg.answer as RTCSessionDescriptionInit));
           } else {
             await pc.setRemoteDescription(new RTCSessionDescription(msg.answer as RTCSessionDescriptionInit));
@@ -242,9 +273,12 @@ export default function HomePage() {
           await pc?.addIceCandidate(new RTCIceCandidate(msg.candidate as RTCIceCandidateInit));
         }
 
-        // voliteľné: ak by si zo servera posielal "balance-update" každých 10s
+        // live updates
         if (msg.type === "balance-update") {
           setSecondsRemaining(msg.secondsRemaining as number);
+        }
+        if (msg.type === "friday-balance-update") {
+          setFridayMinutesRemaining(msg.minutesRemaining as number);
         }
       });
     }
@@ -252,9 +286,8 @@ export default function HomePage() {
     return () => {
       clearCallTimer();
     };
-  }, [isSignedIn, user, pc, startLocalStream, attachRemoteStream, fetchBalance, startUiCountdown, stopCall]);
+  }, [isSignedIn, user, role, pc, startLocalStream, attachRemoteStream, fetchBalance, fetchFridayBalance, startUiCountdown, stopCall]);
 
-  // ===== Notifications toggle (bez zmeny) =====
   const handleEnableNotifications = useCallback(async () => {
     try {
       const permission = await Notification.requestPermission();
@@ -268,7 +301,7 @@ export default function HomePage() {
         return;
       }
       const role = (user.publicMetadata.role as string) || "client";
-      const res = await fetch(`${process.env.NEXT_PUBLIC_BACKEND_URL}/register-fcm`, {
+      const res = await fetch(`${backend}/register-fcm`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ userId: user.id, fcmToken: token, role }),
@@ -283,9 +316,8 @@ export default function HomePage() {
       console.error("FCM chyba:", err);
       alert("Nastala chyba pri nastavovaní notifikácií.");
     }
-  }, [user]);
+  }, [backend, user]);
 
-  // ===== UI =====
   return (
     <main className="min-h-screen bg-gradient-to-br from-stone-100 via-emerald-50 to-amber-50 text-stone-800">
       <div className="max-w-3xl mx-auto p-6">
@@ -312,8 +344,14 @@ export default function HomePage() {
               <div>
                 <p className="text-sm text-stone-500">Prihlásený používateľ</p>
                 <p className="font-medium">{user?.fullName}</p>
+
+                {!isFriday && (
+                  <p className="text-sm text-stone-600 mt-1">
+                    Zostatok (bežný): <span className="font-semibold">{formatSeconds(secondsRemaining)}</span>
+                  </p>
+                )}
                 <p className="text-sm text-stone-600 mt-1">
-                  Zostatok: <span className="font-semibold">{formatSeconds(secondsRemaining)}</span>
+                  Piatkové minúty: <span className="font-semibold">{fridayMinutesRemaining} min</span>
                 </p>
               </div>
 
@@ -328,13 +366,12 @@ export default function HomePage() {
                 )}
                 {role !== "admin" && (
                   <button
-                    onClick={() => window.location.href = "/burza-tokenov"}
+                    onClick={() => (window.location.href = "/burza-tokenov")}
                     className="px-4 py-2 rounded-xl bg-amber-500 text-white shadow hover:bg-amber-600 transition"
                   >
-                    Burza tokenov (1 token = 60 min)
+                    Burza piatkových tokenov
                   </button>
                 )}
-
               </div>
             </div>
           </section>
@@ -344,16 +381,26 @@ export default function HomePage() {
               <div className="flex-1">
                 <h2 className="text-lg font-semibold mb-1">Stav hovoru</h2>
                 <p className="text-stone-600 text-sm">
-                  {incomingCall ? `Prichádzajúci hovor od: ${incomingCall.callerName}` : inCall ? "Prebieha hovor" : "Pripravený na hovor"}
+                  {incomingCall
+                    ? `Prichádzajúci hovor od: ${incomingCall.callerName}`
+                    : inCall
+                    ? "Prebieha hovor"
+                    : "Pripravený na hovor"}
+                </p>
+                <p className="text-xs text-stone-500 mt-1">
+                  {isFriday ? "Piatok: volanie len s piatkovými tokenmi." : "Mimo piatok: volanie z bežného kreditu."}
                 </p>
               </div>
 
               {user?.publicMetadata.role === "client" && (
                 <button
-                  disabled={secondsRemaining <= 0 || inCall}
+                  disabled={(isFriday ? fridayMinutesRemaining <= 0 : secondsRemaining <= 0) || inCall}
                   className={`px-5 py-3 rounded-xl font-medium shadow transition
-                    ${secondsRemaining <= 0 || inCall ? "bg-stone-300 text-stone-500 cursor-not-allowed"
-                                                      : "bg-emerald-600 text-white hover:bg-emerald-700"}`}
+                    ${
+                      (isFriday ? fridayMinutesRemaining <= 0 : secondsRemaining <= 0) || inCall
+                        ? "bg-stone-300 text-stone-500 cursor-not-allowed"
+                        : "bg-emerald-600 text-white hover:bg-emerald-700"
+                    }`}
                   onClick={handleCall}
                 >
                   Zavolať
@@ -384,7 +431,7 @@ export default function HomePage() {
                 </button>
                 <button
                   className="px-4 py-2 rounded-xl bg-stone-700 text-white shadow hover:bg-stone-800 transition disabled:opacity-50"
-                  onClick={() => stopCall(incomingCall?.from)}
+                  onClick={() => stopCall(incomingCall?.from ?? undefined)}
                   disabled={!inCall}
                 >
                   Ukončiť hovor
@@ -395,6 +442,17 @@ export default function HomePage() {
             {/* 🔈 remote audio */}
             <audio ref={remoteAudioRef} autoPlay playsInline className="hidden" />
           </section>
+
+          {!isFriday && (
+            <div className="mt-4">
+              <button
+                onClick={handlePurchaseMvp}
+                className="px-4 py-2 rounded-xl bg-stone-800 text-white shadow hover:bg-stone-900 transition"
+              >
+                Rýchly nákup bežného kreditu (demo)
+              </button>
+            </div>
+          )}
 
           <p className="text-xs text-stone-500 mt-4">
             Tip: Ak nič nepočuť, skontroluj povolenia mikrofónu v prehliadači a systémové nastavenia výstupného zvuku.
