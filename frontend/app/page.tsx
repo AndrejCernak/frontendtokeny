@@ -328,12 +328,13 @@ export default function HomePage() {
                 )}
                 {role !== "admin" && (
                   <button
-                    onClick={handlePurchaseMvp}
+                    onClick={() => window.location.href = "/burza-tokenov"}
                     className="px-4 py-2 rounded-xl bg-amber-500 text-white shadow hover:bg-amber-600 transition"
                   >
-                    Kúpiť 30 min (225 €)
+                    Burza tokenov (1 token = 60 min)
                   </button>
                 )}
+
               </div>
             </div>
           </section>
