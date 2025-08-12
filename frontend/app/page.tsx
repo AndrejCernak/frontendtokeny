@@ -26,7 +26,13 @@ export default function HomePage() {
   // ——— Call state
   const [incomingCall, setIncomingCall] = useState<IncomingCall | null>(null);
   const [pc, setPc] = useState<RTCPeerConnection | null>(null);
-  const [hasNotifications, setHasNotifications] = useState(false);
+  const [hasNotifications, setHasNotifications] = useState<boolean>(() => {
+    if (typeof window === "undefined") return false;
+    return (
+      Notification.permission === "granted" ||
+      localStorage.getItem("fcm-enabled") === "1"
+    );
+  });
   const [isMuted, setIsMuted] = useState(false);
   const [inCall, setInCall] = useState(false);
 
@@ -288,6 +294,29 @@ export default function HomePage() {
     };
   }, [isSignedIn, user, role, pc, startLocalStream, attachRemoteStream, fetchBalance, fetchFridayBalance, startUiCountdown, stopCall]);
 
+  // ===== Auto-register push on app start when already granted =====
+  useEffect(() => {
+    const autoRegisterPush = async () => {
+      if (!isSignedIn || !user) return;
+      if (Notification.permission !== "granted") return;
+      try {
+        const token = await requestFcmToken();
+        if (!token) return;
+        const role = (user.publicMetadata.role as string) || "client";
+        await fetch(`${backend}/register-fcm`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ userId: user.id, fcmToken: token, role }),
+        });
+        setHasNotifications(true);
+        if (typeof window !== "undefined") localStorage.setItem("fcm-enabled", "1");
+      } catch (_) {
+        // ticho – skúsime inokedy
+      }
+    };
+    autoRegisterPush();
+  }, [isSignedIn, user, backend]);
+
   const handleEnableNotifications = useCallback(async () => {
     try {
       const permission = await Notification.requestPermission();
@@ -307,8 +336,9 @@ export default function HomePage() {
         body: JSON.stringify({ userId: user.id, fcmToken: token, role }),
       });
       if (res.ok) {
-        alert("Notifikácie boli povolené ✅");
         setHasNotifications(true);
+        if (typeof window !== "undefined") localStorage.setItem("fcm-enabled", "1");
+        alert("Notifikácie boli povolené ✅");
       } else {
         alert("Chyba pri registrácii tokenu.");
       }

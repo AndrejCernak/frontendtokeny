@@ -13,6 +13,9 @@ const firebaseConfig = {
 
 // ❗️ DÔLEŽITÉ: Inicializuj Firebase, inak `messaging()` nefunguje
 firebase.initializeApp(firebaseConfig);
+// Inicializuj Firebase Cloud Messaging
+
+
 
 const messaging = firebase.messaging();
 
