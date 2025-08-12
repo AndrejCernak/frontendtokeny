@@ -26,6 +26,7 @@ export default function HomePage() {
   // ——— Call state
   const [incomingCall, setIncomingCall] = useState<IncomingCall | null>(null);
   const [pc, setPc] = useState<RTCPeerConnection | null>(null);
+  const pcRef = useRef<RTCPeerConnection | null>(null);
   const [hasNotifications, setHasNotifications] = useState<boolean>(() => {
     if (typeof window === "undefined") return false;
     return (
@@ -112,103 +113,101 @@ export default function HomePage() {
   }, []);
 
   const stopCall = useCallback(
-    async (targetId?: string) => {
-      try {
-        if (pc) {
-          pc.getSenders().forEach((s) => s.track && s.track.stop());
-          pc.close();
-          setPc(null);
-        }
-        localStreamRef.current?.getTracks().forEach((t) => t.stop());
-        localStreamRef.current = null;
-
-        clearCallTimer();
-        setInCall(false);
-        setIsMuted(false);
-
-        const id = targetId ?? peerIdRef.current ?? undefined;
-        if (id) sendWS({ type: "end-call", targetId: id });
-      } finally {
-        peerIdRef.current = null;
-        // refresh presných zostatkov
-        await fetchBalance();
-        await fetchFridayBalance();
+  async (targetId?: string) => {
+    try {
+      const id = targetId ?? peerIdRef.current ?? undefined;
+      if (id) {
+        // pošli info druhej strane skôr, než zrušíš lokálne zdroje
+        sendWS({ type: "end-call", targetId: id });
       }
-    },
-    [pc, fetchBalance, fetchFridayBalance]
-  );
 
-  // ===== Accept / Call =====
-  const handleAccept = useCallback(
+      if (pcRef.current) {
+        pcRef.current.getSenders().forEach(s => s.track && s.track.stop());
+        pcRef.current.close();
+      }
+      pcRef.current = null;
+      setPc(null);
+
+      localStreamRef.current?.getTracks().forEach((t) => t.stop());
+      localStreamRef.current = null;
+
+      clearCallTimer();
+      setInCall(false);
+      setIsMuted(false);
+    } finally {
+      peerIdRef.current = null;
+      // refresh zostatkov
+      await fetchBalance();
+      await fetchFridayBalance();
+    }
+  },
+  [fetchBalance, fetchFridayBalance] // ← pc netreba v deps
+);
+
+// ===== Accept / Call =====
+const handleAccept = useCallback(
   async (targetId: string) => {
-    // 1) priprav lokálny mikrofón
     if (!localStreamRef.current) await startLocalStream();
 
-    // 2) vytvor/nahoď RTCPeerConnection
     const newPc = createPeerConnection(localStreamRef.current!, targetId, attachRemoteStream);
     setPc(newPc);
+    pcRef.current = newPc;   // 🔑
     peerIdRef.current = targetId;
 
     if (pendingOffer && pendingOffer.from === targetId) {
-      // ✅ Máme pending offer → klasický flow: setRemote → createAnswer → send answer
       await newPc.setRemoteDescription(new RTCSessionDescription(pendingOffer.offer));
       const answer = await newPc.createAnswer();
       await newPc.setLocalDescription(answer);
       sendWS({ type: "webrtc-answer", targetId, answer });
       setPendingOffer(null);
-
-      // pre istotu skús pustiť remote audio v rámci užívateľského gesta
       try { remoteAudioRef.current?.play?.(); } catch {}
-
     } else {
-      // ❗ Nemáme offer (app bola zatvorená pri príchode hovoru)
-      // → Pošli cieľu (volajúcemu) požiadavku, nech nám pošle nový offer
+      // app bola zavretá → vypýtaj si čerstvý offer
       sendWS({ type: "request-offer", targetId });
     }
 
-    // UI stav + odpočet
     setInCall(true);
     startUiCountdown();
   },
   [startLocalStream, pendingOffer, attachRemoteStream, startUiCountdown]
 );
 
+const handleCall = useCallback(async () => {
+  if (!user) return;
 
-  const handleCall = useCallback(async () => {
-    if (!user) return;
-
-    // presná kontrola podľa dňa
-    if (isFriday) {
-      const m = await fetchFridayBalance();
-      if (m <= 0) {
-        alert("V piatok môžeš volať iba s piatkovými tokenmi. Skús kúpiť token alebo burzu.");
-        window.location.href = "/burza-tokenov";
-        return;
-      }
-    } else {
-      const s = await fetchBalance();
-      if (s <= 0) {
-        alert("Nemáš dostupné minúty mimo piatku. Kúp kredit alebo piatkový token (len pre piatok).");
-        return;
-      }
+  if (isFriday) {
+    const m = await fetchFridayBalance();
+    if (m <= 0) {
+      alert("V piatok môžeš volať iba s piatkovými tokenmi. Skús kúpiť token alebo burzu.");
+      window.location.href = "/burza-tokenov";
+      return;
     }
+  } else {
+    const s = await fetchBalance();
+    if (s <= 0) {
+      alert("Nemáš dostupné minúty mimo piatku. Kúp kredit alebo piatkový token (len pre piatok).");
+      return;
+    }
+  }
 
-    if (!localStreamRef.current) await startLocalStream();
+  if (!localStreamRef.current) await startLocalStream();
 
-    const targetId = adminId;
-    const newPc = createPeerConnection(localStreamRef.current!, targetId, attachRemoteStream);
-    setPc(newPc);
-    peerIdRef.current = targetId;
+  const targetId = adminId;
+  const newPc = createPeerConnection(localStreamRef.current!, targetId, attachRemoteStream);
+  setPc(newPc);
+  pcRef.current = newPc;   // 🔑
+  peerIdRef.current = targetId;
 
-    const offer = await newPc.createOffer();
-    await newPc.setLocalDescription(offer);
+  const offer = await newPc.createOffer();
+  await newPc.setLocalDescription(offer);
 
-    sendWS({ type: "call-request", targetId, callerName: user?.fullName || "Neznámy" });
-    sendWS({ type: "webrtc-offer", targetId, offer, callerId: user?.id });
+  sendWS({ type: "call-request", targetId, callerName: user?.fullName || "Neznámy" });
+  sendWS({ type: "webrtc-offer", targetId, offer, callerId: user?.id });
 
-    setInCall(true);
-    startUiCountdown();
-  }, [user, isFriday, fetchFridayBalance, fetchBalance, startLocalStream, attachRemoteStream, startUiCountdown, adminId]);
+  setInCall(true);
+  startUiCountdown();
+}, [user, isFriday, fetchFridayBalance, fetchBalance, startLocalStream, attachRemoteStream, startUiCountdown, adminId]);
+
 
   // ===== MVP kredit nákup (mimo piatok) — nechávam pre kompatibilitu
   const handlePurchaseMvp = useCallback(async () => {
@@ -295,15 +294,18 @@ export default function HomePage() {
       }
 
       if (msg.type === "webrtc-offer") {
-        if (!pc) {
+        const pcLocal = pcRef.current;
+        if (!pcLocal) {
           setPendingOffer({ offer: msg.offer as RTCSessionDescriptionInit, from: msg.callerId as string });
         } else {
-          await pc.setRemoteDescription(new RTCSessionDescription(msg.offer as RTCSessionDescriptionInit));
-          const answer = await pc.createAnswer();
-          await pc.setLocalDescription(answer);
+          await pcLocal.setRemoteDescription(new RTCSessionDescription(msg.offer as RTCSessionDescriptionInit));
+          const answer = await pcLocal.createAnswer();
+          await pcLocal.setLocalDescription(answer);
           sendWS({ type: "webrtc-answer", targetId: msg.callerId, answer });
+          try { remoteAudioRef.current?.play?.(); } catch {}
         }
       }
+
 
       if (msg.type === "webrtc-answer") {
         if (!localStreamRef.current) await startLocalStream();
@@ -353,6 +355,23 @@ export default function HomePage() {
   stopCall,
   sendNewOffer // ➕ nezabudni pridať do deps
 ]);
+
+useEffect(() => {
+  (async () => {
+    if (pendingOffer && pcRef.current) {
+      try {
+        await pcRef.current.setRemoteDescription(new RTCSessionDescription(pendingOffer.offer));
+        const answer = await pcRef.current.createAnswer();
+        await pcRef.current.setLocalDescription(answer);
+        sendWS({ type: "webrtc-answer", targetId: pendingOffer.from, answer });
+        setPendingOffer(null);
+        try { remoteAudioRef.current?.play?.(); } catch {}
+      } catch (e) {
+        console.error("auto-accept pendingOffer failed:", e);
+      }
+    }
+  })();
+}, [pendingOffer]);
 
 
   // ===== Auto-register push on app start when already granted =====
