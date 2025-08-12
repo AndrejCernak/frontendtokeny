@@ -38,7 +38,6 @@ export default function HomePage() {
   const [inCall, setInCall] = useState(false);
 
   // ——— Balances
-  const [secondsRemaining, setSecondsRemaining] = useState<number>(0); // non-Friday credit
   const [fridayMinutesRemaining, setFridayMinutesRemaining] = useState<number>(0); // Friday tokens credit (minutes)
   const isFriday = useMemo(() => isFridayInBratislava(), []);
 
@@ -53,15 +52,6 @@ export default function HomePage() {
   // ===== Backend helpers =====
   const backend = process.env.NEXT_PUBLIC_BACKEND_URL!;
   const adminId = process.env.NEXT_PUBLIC_ADMIN_ID as string; // nastav vo Verceli
-
-  const fetchBalance = useCallback(async () => {
-    if (!user) return 0;
-    const res = await fetch(`${backend}/balance/${user.id}`);
-    const data = await res.json();
-    const s = data?.secondsRemaining ?? 0;
-    setSecondsRemaining(s);
-    return s;
-  }, [backend, user]);
 
   const fetchFridayBalance = useCallback(async () => {
     if (!user) return 0;
@@ -103,14 +93,7 @@ export default function HomePage() {
     }
   };
 
-  const startUiCountdown = useCallback(() => {
-    clearCallTimer();
-    callTimerRef.current = setInterval(() => {
-      // UI len „tiká“; server posiela presné updaty
-      setSecondsRemaining((prev) => (prev > 0 ? prev - 1 : prev));
-      setFridayMinutesRemaining((prev) => prev); // nechávame na server push
-    }, 1000);
-  }, []);
+
 
   const stopCall = useCallback(
   async (targetId?: string) => {
@@ -137,11 +120,10 @@ export default function HomePage() {
     } finally {
       peerIdRef.current = null;
       // refresh zostatkov
-      await fetchBalance();
       await fetchFridayBalance();
     }
   },
-  [fetchBalance, fetchFridayBalance] // ← pc netreba v deps
+  [fetchFridayBalance] // ← pc netreba v deps
 );
 
 // ===== Accept / Call =====
@@ -167,28 +149,23 @@ const handleAccept = useCallback(
     }
 
     setInCall(true);
-    startUiCountdown();
   },
-  [startLocalStream, pendingOffer, attachRemoteStream, startUiCountdown]
+  [startLocalStream, pendingOffer, attachRemoteStream]
 );
 
 const handleCall = useCallback(async () => {
   if (!user) return;
 
   if (isFriday) {
-    const m = await fetchFridayBalance();
-    if (m <= 0) {
-      alert("V piatok môžeš volať iba s piatkovými tokenmi. Skús kúpiť token alebo burzu.");
-      window.location.href = "/burza-tokenov";
-      return;
-    }
-  } else {
-    const s = await fetchBalance();
-    if (s <= 0) {
-      alert("Nemáš dostupné minúty mimo piatku. Kúp kredit alebo piatkový token (len pre piatok).");
-      return;
-    }
+  const m = await fetchFridayBalance();
+  if (m <= 0) {
+    alert("V piatok môžeš volať iba s piatkovými tokenmi. Skús kúpiť token alebo burzu.");
+    window.location.href = "/burza-tokenov";
+    return;
   }
+}
+// mimo piatku: žiadna kontrola, volanie je zadarmo
+
 
   if (!localStreamRef.current) await startLocalStream();
 
@@ -205,30 +182,8 @@ const handleCall = useCallback(async () => {
   sendWS({ type: "webrtc-offer", targetId, offer, callerId: user?.id });
 
   setInCall(true);
-  startUiCountdown();
-}, [user, isFriday, fetchFridayBalance, fetchBalance, startLocalStream, attachRemoteStream, startUiCountdown, adminId]);
+}, [user, isFriday, fetchFridayBalance, startLocalStream, attachRemoteStream, adminId]);
 
-
-  // ===== MVP kredit nákup (mimo piatok) — nechávam pre kompatibilitu
-  const handlePurchaseMvp = useCallback(async () => {
-    if (!user) return;
-    try {
-      const res = await fetch(`${backend}/purchase`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ userId: user.id, amountEur: 225.0 }), // 30 min
-      });
-      const data = await res.json();
-      if (data?.success) {
-        await fetchBalance();
-        alert("Kredit navýšený. Môžeš volať 👍");
-      } else {
-        alert("Nákup zlyhal.");
-      }
-    } catch {
-      alert("Chyba pri nákupe.");
-    }
-  }, [backend, user, fetchBalance]);
 
   const sendNewOffer = useCallback(
   async (targetId: string) => {
@@ -263,18 +218,11 @@ const handleCall = useCallback(async () => {
   useEffect(() => {
   if (isSignedIn && user) {
     // hneď načítaj oba zostatky
-    fetchBalance();
     fetchFridayBalance();
 
     connectWS(user.id, role, async (msg) => {
       if (msg.type === "incoming-call") {
         setIncomingCall({ from: msg.callerId as string, callerName: msg.callerName as string });
-      }
-
-      if (msg.type === "insufficient-tokens") {
-        alert("Nemáš dostupný kredit. Kúp si kredit.");
-        setInCall(false);
-        clearCallTimer();
       }
 
       if (msg.type === "insufficient-friday-tokens") {
@@ -286,7 +234,6 @@ const handleCall = useCallback(async () => {
 
       if (msg.type === "call-started") {
         setInCall(true);
-        startUiCountdown();
       }
 
       if (msg.type === "end-call") {
@@ -307,21 +254,30 @@ const handleCall = useCallback(async () => {
       }
 
 
-      if (msg.type === "webrtc-answer") {
-        if (!localStreamRef.current) await startLocalStream();
-        if (!pc) {
-          const newPc = createPeerConnection(localStreamRef.current!, msg.callerId as string, attachRemoteStream);
-          setPc(newPc);
-          peerIdRef.current = msg.callerId as string;
-          await newPc.setRemoteDescription(new RTCSessionDescription(msg.answer as RTCSessionDescriptionInit));
-        } else {
-          await pc.setRemoteDescription(new RTCSessionDescription(msg.answer as RTCSessionDescriptionInit));
+     if (msg.type === "webrtc-answer") {
+      if (!localStreamRef.current) await startLocalStream();
+
+      let pcLocal = pcRef.current;
+      if (!pcLocal) {
+        const newPc = createPeerConnection(localStreamRef.current!, msg.callerId as string, attachRemoteStream);
+        setPc(newPc);
+        pcRef.current = newPc; // 🔑
+        peerIdRef.current = msg.callerId as string;
+        pcLocal = newPc;
+      }
+
+      await pcLocal.setRemoteDescription(new RTCSessionDescription(msg.answer as RTCSessionDescriptionInit));
+      try { remoteAudioRef.current?.play?.(); } catch {}
+    }
+
+
+      if (msg.type === "webrtc-candidate") {
+        const pcLocal = pcRef.current;
+        if (pcLocal) {
+          await pcLocal.addIceCandidate(new RTCIceCandidate(msg.candidate as RTCIceCandidateInit));
         }
       }
 
-      if (msg.type === "webrtc-candidate") {
-        await pc?.addIceCandidate(new RTCIceCandidate(msg.candidate as RTCIceCandidateInit));
-      }
 
       // 🔁 NOVÉ: admin žiada nový offer po “prebudení” PWA
       if (msg.type === "request-offer") {
@@ -330,9 +286,6 @@ const handleCall = useCallback(async () => {
       }
 
       // live updates
-      if (msg.type === "balance-update") {
-        setSecondsRemaining(msg.secondsRemaining as number);
-      }
       if (msg.type === "friday-balance-update") {
         setFridayMinutesRemaining(msg.minutesRemaining as number);
       }
@@ -346,14 +299,11 @@ const handleCall = useCallback(async () => {
   isSignedIn,
   user,
   role,
-  pc,
   startLocalStream,
   attachRemoteStream,
-  fetchBalance,
   fetchFridayBalance,
-  startUiCountdown,
   stopCall,
-  sendNewOffer // ➕ nezabudni pridať do deps
+  sendNewOffer 
 ]);
 
 useEffect(() => {
@@ -391,7 +341,6 @@ useEffect(() => {
         setHasNotifications(true);
         if (typeof window !== "undefined") localStorage.setItem("fcm-enabled", "1");
       } catch (_) {
-        // ticho – skúsime inokedy
       }
     };
     autoRegisterPush();
@@ -454,12 +403,6 @@ useEffect(() => {
               <div>
                 <p className="text-sm text-stone-500">Prihlásený používateľ</p>
                 <p className="font-medium">{user?.fullName}</p>
-
-                {!isFriday && (
-                  <p className="text-sm text-stone-600 mt-1">
-                    Zostatok (bežný): <span className="font-semibold">{formatSeconds(secondsRemaining)}</span>
-                  </p>
-                )}
                 <p className="text-sm text-stone-600 mt-1">
                   Piatkové minúty: <span className="font-semibold">{fridayMinutesRemaining} min</span>
                 </p>
@@ -498,16 +441,16 @@ useEffect(() => {
                     : "Pripravený na hovor"}
                 </p>
                 <p className="text-xs text-stone-500 mt-1">
-                  {isFriday ? "Piatok: volanie len s piatkovými tokenmi." : "Mimo piatok: volanie z bežného kreditu."}
+                  {isFriday ? "Piatok: volanie len s piatkovými tokenmi." : "Mimo piatku: volanie je zadarmo."}
                 </p>
               </div>
 
               {user?.publicMetadata.role === "client" && (
                 <button
-                  disabled={(isFriday ? fridayMinutesRemaining <= 0 : secondsRemaining <= 0) || inCall}
+                  disabled={(isFriday ? fridayMinutesRemaining <= 0 : false) || inCall}
                   className={`px-5 py-3 rounded-xl font-medium shadow transition
                     ${
-                      (isFriday ? fridayMinutesRemaining <= 0 : secondsRemaining <= 0) || inCall
+                      (isFriday ? fridayMinutesRemaining <= 0 : false) || inCall
                         ? "bg-stone-300 text-stone-500 cursor-not-allowed"
                         : "bg-emerald-600 text-white hover:bg-emerald-700"
                     }`}
@@ -516,6 +459,7 @@ useEffect(() => {
                   Zavolať
                 </button>
               )}
+
 
               {user?.publicMetadata.role === "admin" && incomingCall && (
                 <div className="flex items-center gap-3">
@@ -553,16 +497,7 @@ useEffect(() => {
             <audio ref={remoteAudioRef} autoPlay playsInline className="hidden" />
           </section>
 
-          {!isFriday && (
-            <div className="mt-4">
-              <button
-                onClick={handlePurchaseMvp}
-                className="px-4 py-2 rounded-xl bg-stone-800 text-white shadow hover:bg-stone-900 transition"
-              >
-                Rýchly nákup bežného kreditu (demo)
-              </button>
-            </div>
-          )}
+          
 
           <p className="text-xs text-stone-500 mt-4">
             Tip: Ak nič nepočuť, skontroluj povolenia mikrofónu v prehliadači a systémové nastavenia výstupného zvuku.
