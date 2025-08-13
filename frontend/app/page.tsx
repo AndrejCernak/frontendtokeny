@@ -117,18 +117,21 @@ export default function HomePage() {
       clearCallTimer();
       setInCall(false);
       setIsMuted(false);
+      setIncomingCall(null);            // 👈 skry "niekto volá"
+      setPendingOffer(null);            // (voliteľné) zruš pending SDP
     } finally {
       peerIdRef.current = null;
-      // refresh zostatkov
       await fetchFridayBalance();
     }
   },
-  [fetchFridayBalance] // ← pc netreba v deps
+  [fetchFridayBalance]
 );
+
 
 // ===== Accept / Call =====
 const handleAccept = useCallback(
   async (targetId: string) => {
+    setIncomingCall(null);              // 👈 skry kartu s "Prichádzajúci hovor"
     if (!localStreamRef.current) await startLocalStream();
 
     const newPc = createPeerConnection(localStreamRef.current!, targetId, attachRemoteStream);
@@ -233,10 +236,13 @@ const handleCall = useCallback(async () => {
       }
 
       if (msg.type === "call-started") {
+          setIncomingCall(null);                // 👈 po nabehnutí hovoru neukazuj "niekto volá"
         setInCall(true);
       }
 
       if (msg.type === "end-call") {
+          setIncomingCall(null);                // 👈 skry prichádzajúci hovor
+
         await stopCall(msg.from as string | undefined);
       }
 
@@ -485,7 +491,7 @@ useEffect(() => {
                 </button>
                 <button
                   className="px-4 py-2 rounded-xl bg-stone-700 text-white shadow hover:bg-stone-800 transition disabled:opacity-50"
-                  onClick={() => stopCall(incomingCall?.from ?? undefined)}
+                  onClick={() => stopCall()}             // 👈 bez parametra
                   disabled={!inCall}
                 >
                   Ukončiť hovor
