@@ -23,6 +23,9 @@ export default function HomePage() {
   const { user, isSignedIn } = useUser();
   const role = (user?.publicMetadata.role as string) || "client";
 
+
+  
+
   // ——— Call state
   const [incomingCall, setIncomingCall] = useState<IncomingCall | null>(null);
   const [pc, setPc] = useState<RTCPeerConnection | null>(null);
@@ -37,6 +40,9 @@ export default function HomePage() {
   const [isMuted, setIsMuted] = useState(false);
   const [inCall, setInCall] = useState(false);
 
+  const [mintQty, setMintQty] = useState<number>(100);
+  const [mintPrice, setMintPrice] = useState<string>("400");
+  const [newPrice, setNewPrice] = useState<string>("");
   // ——— Balances
   const [fridayMinutesRemaining, setFridayMinutesRemaining] = useState<number>(0); // Friday tokens credit (minutes)
   const isFriday = useMemo(() => isFridayInBratislava(), []);

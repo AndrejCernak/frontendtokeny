@@ -47,6 +47,18 @@ export default function BurzaTokenovPage() {
   const [listings, setListings] = useState<Listing[]>([]);
   const [listPrice, setListPrice] = useState<Record<string, string>>({}); // tokenId -> price input
 
+  const [mintQty, setMintQty] = useState<number>(100);
+  const [mintPrice, setMintPrice] = useState<string>("400");
+  const [newPrice, setNewPrice] = useState<string>("");
+
+  const MAX_PER_USER = 20;
+  const ownedActive = balance?.tokens ? balance.tokens.length : 0;
+  const maxCanBuy = Math.max(
+    0,
+    Math.min(MAX_PER_USER - ownedActive, supply?.treasuryAvailable ?? 0)
+  );
+
+
   const tokensActive = useMemo(
     () => (balance?.tokens || []).filter((t) => t.status === "active" && t.minutesRemaining > 0),
     [balance]
@@ -58,7 +70,6 @@ export default function BurzaTokenovPage() {
     () => (balance?.tokens || []).filter((t) => t.issuedYear === currentYear).length,
     [balance, currentYear]
   );
-  const maxCanBuy = Math.max(0, 20 - ownedThisYear);
 
   const fetchSupply = useCallback(async () => {
     const res = await fetch(`${backend}/friday/supply?year=${currentYear}`);
@@ -111,6 +122,57 @@ export default function BurzaTokenovPage() {
       alert(data?.message || "Nákup zlyhal.");
     }
   }, [backend, user, qty, maxCanBuy, currentYear, fetchBalance, fetchSupply, supply]);
+
+  const handleAdminMint = useCallback(async () => {
+  if (role !== "admin") return;
+  const quantity = Number(mintQty);
+  const priceEur = Number(mintPrice);
+  if (!quantity || quantity <= 0 || !priceEur || priceEur <= 0) {
+    alert("Vyplň počet a cenu (> 0).");
+    return;
+  }
+  const res = await fetch(`${backend}/friday/admin/mint`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+  adminId: process.env.NEXT_PUBLIC_ADMIN_ID,
+  quantity,
+  priceEur,
+}),
+  });
+  const data = await res.json();
+  if (res.ok && data?.success) {
+    alert(`Vygenerovaných ${quantity} tokenov za ${priceEur.toFixed?.(2) ?? priceEur} €/ks ✅`);
+    await fetchSupply();
+  } else {
+    alert(data?.message || "Mint zlyhal.");
+  }
+}, [role, backend, mintQty, mintPrice, currentYear, fetchSupply]);
+
+const handleAdminUpdatePrice = useCallback(async () => {
+  if (role !== "admin") return;
+  const price = Number(newPrice);
+  if (!price || price <= 0) {
+    alert("Zadaj novú cenu v € (> 0).");
+    return;
+  }
+  const res = await fetch(`${backend}/friday/admin/update-price`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+    adminId: process.env.NEXT_PUBLIC_ADMIN_ID,
+    newPriceEur: price,
+  }),
+  });
+  const data = await res.json();
+  if (res.ok && data?.success) {
+    alert(`Cena upravená na ${price.toFixed(2)} € ✅`);
+    setNewPrice("");
+    await fetchSupply();
+  } else {
+    alert(data?.message || "Zmena ceny zlyhala.");
+  }
+}, [role, backend, newPrice, currentYear, fetchSupply]);
 
   const handleListToken = useCallback(
     async (tokenId: string) => {
@@ -225,34 +287,111 @@ export default function BurzaTokenovPage() {
             </div>
           </section>
 
+{role === "admin" && (
+  <section className="rounded-2xl bg-white/80 backdrop-blur shadow-sm border border-stone-200 p-5 mb-6">
+    <h2 className="text-lg font-semibold">Admin – pokladnica</h2>
+    <p className="text-sm text-stone-600 mt-1">
+      Aktuálna cena:{" "}
+      <span className="font-semibold">
+        {supply ? Number(supply.priceEur).toFixed(2) : "…"} €
+      </span>
+      /token • V pokladnici:{" "}
+      <span className="font-semibold">{supply?.treasuryAvailable ?? 0}</span>
+    </p>
+
+
+    <div className="mt-4 grid gap-4 md:grid-cols-2">
+      {/* Mint + cena */}
+      <div className="rounded-xl border border-stone-200 bg-white p-4">
+        <div className="font-medium mb-2">Vygenerovať tokeny</div>
+        <div className="flex items-center gap-2">
+          <input
+            type="number"
+            min={1}
+            value={mintQty}
+            onChange={(e) => setMintQty(parseInt(e.target.value || "1", 10))}
+            className="w-28 px-3 py-2 rounded-xl border border-stone-300 bg-white"
+            placeholder="Počet"
+          />
+          <input
+            type="number"
+            min={1}
+            step="1"
+            value={mintPrice}
+            onChange={(e) => setMintPrice(e.target.value)}
+            className="w-32 px-3 py-2 rounded-xl border border-stone-300 bg-white"
+            placeholder="€ / token"
+          />
+          <button
+            onClick={handleAdminMint}
+            className="px-4 py-2 rounded-xl bg-emerald-600 text-white shadow hover:bg-emerald-700 transition"
+          >
+            Generovať
+          </button>
+        </div>
+        <p className="text-xs text-stone-500 mt-2">Vytvorí {mintQty} ks a nastaví cenu na {mintPrice} €/ks.</p>
+      </div>
+
+          {/* Zmeniť cenu v pokladnici */}
+          <div className="rounded-xl border border-stone-200 bg-white p-4">
+            <div className="font-medium mb-2">Zmeniť cenu (nepredané)</div>
+            <div className="flex items-center gap-2">
+              <input
+                type="number"
+                min={1}
+                step="1"
+                value={newPrice}
+                onChange={(e) => setNewPrice(e.target.value)}
+                className="w-32 px-3 py-2 rounded-xl border border-stone-300 bg-white"
+                placeholder="Nová cena €"
+              />
+              <button
+                onClick={handleAdminUpdatePrice}
+                className="px-4 py-2 rounded-xl bg-amber-500 text-white shadow hover:bg-amber-600 transition"
+              >
+                Zmeniť sumu
+              </button>
+            </div>
+            <p className="text-xs text-stone-500 mt-2">
+              Ovplyvní iba primárnu cenu v pokladnici – už zakúpené tokeny a listingy ostávajú nezmenené.
+            </p>
+          </div>
+        </div>
+      </section>
+    )}
+
           {role !== "admin" && (
             <>
               {/* Primárny nákup */}
               <section className="rounded-2xl bg-white/80 backdrop-blur shadow-sm border border-stone-200 p-5 mb-6">
                 <h2 className="text-lg font-semibold">Primárny nákup (pokladnica)</h2>
                 <p className="text-sm text-stone-600 mt-1">
-                  Rok {currentYear} • Cena:{" "}
-                  <span className="font-semibold">{supply ? supply.priceEur.toFixed(2) : "…"} €</span>/token •
-                  Dostupných v pokladnici:{" "}
+                  Cena:{" "}
+                  <span className="font-semibold">
+                    {supply ? Number(supply.priceEur).toFixed(2) : "…"} €
+                  </span>
+                  /token • Dostupných v pokladnici:{" "}
                   <span className="font-semibold">{supply?.treasuryAvailable ?? 0}</span>
                 </p>
+
                 <p className="text-xs text-stone-500 mt-1">
-                  Limit: max 20 tokenov/rok/osoba. Aktuálne držíš {ownedThisYear} tokenov z {currentYear}.
+                  Limit: max {MAX_PER_USER} tokenov na osobu. Aktuálne držíš {ownedActive} tokenov.
                 </p>
 
+
                 <div className="mt-4 flex items-center gap-3">
-                  <input
-                    type="number"
-                    min={1}
-                    max={Math.min(20, supply?.treasuryAvailable ?? 0)}
-                    value={qty}
-                    onChange={(e) => setQty(parseInt(e.target.value || "1", 10))}
-                    className="w-24 px-3 py-2 rounded-xl border border-stone-300 bg-white"
-                  />
-                  <button
+                    <input
+                      type="number"
+                      min={1}
+                      max={maxCanBuy}
+                      value={qty}
+                      onChange={(e) => setQty(parseInt(e.target.value || "1", 10))}
+                      className="w-24 px-3 py-2 rounded-xl border border-stone-300 bg-white"
+                    />
+                 <button
                     onClick={handlePrimaryBuy}
                     className="px-4 py-2 rounded-xl bg-amber-500 text-white shadow hover:bg-amber-600 transition"
-                    disabled={role === "admin" || !supply || (supply?.treasuryAvailable ?? 0) <= 0 || maxCanBuy <= 0}
+                    disabled={!supply || (supply?.treasuryAvailable ?? 0) <= 0 || maxCanBuy <= 0}
                   >
                     Kúpiť tokeny
                   </button>
@@ -266,7 +405,7 @@ export default function BurzaTokenovPage() {
                   {(balance?.tokens || []).map((t) => (
                     <div key={t.id} className="rounded-xl border border-stone-200 bg-white p-4">
                       <div className="flex items-center justify-between">
-                        <div className="font-medium">Rok {t.issuedYear}</div>
+                        <div className="font-medium">Piatkový token</div>
                         <div
                           className={`text-xs px-2 py-1 rounded-full ${
                             t.status === "active"
@@ -326,7 +465,7 @@ export default function BurzaTokenovPage() {
                       <div key={l.id} className="rounded-xl border border-stone-200 bg-white p-4 flex flex-col gap-2">
                         <div className="flex items-center justify-between">
                           <div className="font-medium">
-                            Token {l.token.issuedYear}, {l.token.minutesRemaining} min
+                            Token • {l.token.minutesRemaining} min
                           </div>
                           <div className="text-stone-600">{Number(l.priceEur).toFixed(2)} €</div>
                         </div>
