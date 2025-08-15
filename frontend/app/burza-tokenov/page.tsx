@@ -216,7 +216,7 @@ export default function BurzaTokenovPage() {
   const handleBuyListing = useCallback(
     async (listingId: string) => {
       if (!user) return;
-      const res = await fetch(`${backend}/friday/buy-listing`, {
+      const res = await fetch(`${backend}/friday/purchase`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ buyerId: user.id, listingId }),
