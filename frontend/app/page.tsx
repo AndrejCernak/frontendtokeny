@@ -40,9 +40,7 @@ export default function HomePage() {
   const [isMuted, setIsMuted] = useState(false);
   const [inCall, setInCall] = useState(false);
 
-  const [mintQty, setMintQty] = useState<number>(100);
-  const [mintPrice, setMintPrice] = useState<string>("400");
-  const [newPrice, setNewPrice] = useState<string>("");
+  
   // ——— Balances
   const [fridayMinutesRemaining, setFridayMinutesRemaining] = useState<number>(0); // Friday tokens credit (minutes)
   const isFriday = useMemo(() => isFridayInBratislava(), []);
@@ -429,14 +427,13 @@ useEffect(() => {
                     Povoliť notifikácie
                   </button>
                 )}
-                {role !== "admin" && (
                   <button
                     onClick={() => (window.location.href = "/burza-tokenov")}
                     className="px-4 py-2 rounded-xl bg-amber-500 text-white shadow hover:bg-amber-600 transition"
                   >
                     Burza piatkových tokenov
                   </button>
-                )}
+                
               </div>
             </div>
           </section>
