@@ -175,6 +175,57 @@ export default function BurzaTokenovPage() {
     [backend, user, fetchBalance, fetchListings]
   );
 
+  // v BurzaTokenovPage (len doplnky/úpravy)
+
+const handleAdminMint = useCallback(async () => {
+  if (role !== "admin") return;
+  const qtyStr = prompt("Koľko tokenov chceš vytvoriť?");
+  const priceStr = prompt("Za akú cenu (€) ich chceš ponúknuť?");
+  const yearStr = prompt(`Pre aký rok? (default ${currentYear})`) || `${currentYear}`;
+  const qty = Number(qtyStr);
+  const price = Number((priceStr || "").replace(",", "."));
+  const year = Number(yearStr);
+
+  if (!Number.isInteger(qty) || qty <= 0 || !Number.isFinite(price) || price <= 0 || !Number.isInteger(year)) {
+    alert("Neplatné vstupy.");
+    return;
+  }
+
+  const res = await fetch(`${backend}/friday/admin/mint`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" /* + Authorization ak pridáš */ },
+    body: JSON.stringify({ quantity: qty, priceEur: price, year }),
+  });
+  const data = await res.json();
+  if (res.ok && data?.success) {
+    alert(`Vytvorených ${qty} tokenov pre rok ${year} @ ${price.toFixed(2)} €`);
+    await fetchSupply();
+  } else {
+    alert(data?.message || "Mint zlyhal.");
+  }
+}, [backend, role, currentYear, fetchSupply]);
+
+const handleAdminSetPrice = useCallback(async () => {
+  if (role !== "admin") return;
+  const priceStr = prompt("Nová cena v pokladnici (€):");
+  const price = Number((priceStr || "").replace(",", "."));
+  if (!Number.isFinite(price) || price <= 0) { alert("Neplatná cena."); return; }
+
+  const res = await fetch(`${backend}/friday/admin/set-price`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ priceEur: price }),
+  });
+  const data = await res.json();
+  if (res.ok && data?.success) {
+    alert(`Cena nastavená na ${price.toFixed(2)} €`);
+    await fetchSupply();
+  } else {
+    alert(data?.message || "Zmena ceny zlyhala.");
+  }
+}, [backend, role, fetchSupply]);
+
+
   return (
     <main className="min-h-screen bg-gradient-to-br from-stone-100 via-emerald-50 to-amber-50 text-stone-800">
       <div className="max-w-5xl mx-auto p-6">
@@ -224,6 +275,39 @@ export default function BurzaTokenovPage() {
               )}
             </div>
           </section>
+
+            {role === "admin" && (
+              <section className="rounded-2xl bg-white/80 backdrop-blur shadow-sm border border-stone-200 p-5 mb-6">
+                <h2 className="text-lg font-semibold">Admin – pokladnica</h2>
+                <p className="text-sm text-stone-600 mt-1">
+                  Aktuálna cena: <span className="font-semibold">
+                    {supply ? supply.priceEur.toFixed(2) : "…"} €
+                  </span> • V pokladnici: <span className="font-semibold">
+                    {supply?.treasuryAvailable ?? 0}
+                  </span> tokenov (rok {currentYear})
+                </p>
+                <div className="mt-4 flex flex-wrap gap-3">
+                  <button
+                    onClick={handleAdminMint}
+                    className="px-4 py-2 rounded-xl bg-emerald-600 text-white shadow hover:bg-emerald-700 transition"
+                  >
+                    Vytvoriť tokeny
+                  </button>
+                  <button
+                    onClick={handleAdminSetPrice}
+                    className="px-4 py-2 rounded-xl bg-amber-500 text-white shadow hover:bg-amber-600 transition"
+                  >
+                    Zmeniť cenu
+                  </button>
+                  <button
+                    onClick={() => { fetchSupply(); fetchListings(); }}
+                    className="px-4 py-2 rounded-xl bg-stone-700 text-white shadow hover:bg-stone-800 transition"
+                  >
+                    Obnoviť
+                  </button>
+                </div>
+              </section>
+            )}
 
           {role !== "admin" && (
             <>
