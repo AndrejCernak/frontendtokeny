@@ -523,14 +523,12 @@ export default function HomePage() {
                     Povoliť notifikácie
                   </button>
                 )}
-                {role !== "admin" && (
                   <button
                     onClick={() => (window.location.href = "/burza-tokenov")}
                     className="px-4 py-2 rounded-xl bg-amber-500 text-white shadow hover:bg-amber-600 transition"
                   >
                     Burza piatkových tokenov
                   </button>
-                )}
               </div>
             </div>
           </section>

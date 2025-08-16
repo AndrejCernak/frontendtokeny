@@ -1,6 +1,6 @@
 "use client";
 
-import { SignedIn, SignedOut, SignInButton, useUser } from "@clerk/nextjs";
+import { SignedIn, SignedOut, SignInButton, useUser, useAuth } from "@clerk/nextjs";
 import { useCallback, useEffect, useMemo, useState } from "react";
 
 type FridayToken = {
@@ -36,6 +36,7 @@ type Listing = {
 
 export default function BurzaTokenovPage() {
   const { user, isSignedIn } = useUser();
+  const { getToken } = useAuth();
   const role = (user?.publicMetadata.role as string) || "client";
 
   const backend = process.env.NEXT_PUBLIC_BACKEND_URL!;
@@ -43,9 +44,9 @@ export default function BurzaTokenovPage() {
   const [supply, setSupply] = useState<SupplyInfo | null>(null);
 
   const [balance, setBalance] = useState<FridayBalance | null>(null);
-  const [qty, setQty] = useState<number>(1); // primary purchase quantity
+  const [qty, setQty] = useState<number>(1);
   const [listings, setListings] = useState<Listing[]>([]);
-  const [listPrice, setListPrice] = useState<Record<string, string>>({}); // tokenId -> price input
+  const [listPrice, setListPrice] = useState<Record<string, string>>({});
 
   const tokensActive = useMemo(
     () => (balance?.tokens || []).filter((t) => t.status === "active" && t.minutesRemaining > 0),
@@ -53,9 +54,12 @@ export default function BurzaTokenovPage() {
   );
   const tokensListed = useMemo(() => (balance?.tokens || []).filter((t) => t.status === "listed"), [balance]);
 
-  // limit 20 ks / user / rok – odčítame koľko už má z tohto roku
+  // limit 20 ks / user / rok – rátame len držané (active + listed)
   const ownedThisYear = useMemo(
-    () => (balance?.tokens || []).filter((t) => t.issuedYear === currentYear).length,
+    () =>
+      (balance?.tokens || []).filter(
+        (t) => t.issuedYear === currentYear && (t.status === "active" || t.status === "listed")
+      ).length,
     [balance, currentYear]
   );
   const maxCanBuy = Math.max(0, 20 - ownedThisYear);
@@ -85,15 +89,25 @@ export default function BurzaTokenovPage() {
     if (isSignedIn) fetchBalance();
   }, [isSignedIn, fetchSupply, fetchBalance, fetchListings]);
 
+  // Helper: auth headers pre admin volania
+  const authHeaders = useCallback(async () => {
+    return {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${await getToken()}`,
+    };
+  }, [getToken]);
+
   const handlePrimaryBuy = useCallback(async () => {
     if (!user) return;
     if (!supply) return;
-    if (qty <= 0) return;
-    if (qty > maxCanBuy) {
+
+    const q = Number.isFinite(qty) && qty > 0 ? qty : 1;
+
+    if (q > maxCanBuy) {
       alert(`Maximálne môžeš dokúpiť ešte ${maxCanBuy} tokenov pre rok ${currentYear}.`);
       return;
     }
-    if (qty > supply.treasuryAvailable) {
+    if (q > (supply.treasuryAvailable ?? 0)) {
       alert("Nie je dostatok tokenov v pokladnici.");
       return;
     }
@@ -101,11 +115,11 @@ export default function BurzaTokenovPage() {
     const res = await fetch(`${backend}/friday/purchase`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ userId: user.id, quantity: qty, year: currentYear }),
+      body: JSON.stringify({ userId: user.id, quantity: q, year: currentYear }),
     });
     const data = await res.json();
     if (res.ok && data?.success) {
-      alert(`Zakúpené ${qty} token${qty === 1 ? "" : "y"} za ${data.unitPrice.toFixed(2)} €/ks ✅`);
+      alert(`Zakúpené ${q} token${q === 1 ? "" : "y"} za ${Number(data.unitPrice).toFixed(2)} €/ks ✅`);
       await Promise.all([fetchBalance(), fetchSupply()]);
     } else {
       alert(data?.message || "Nákup zlyhal.");
@@ -116,8 +130,8 @@ export default function BurzaTokenovPage() {
     async (tokenId: string) => {
       if (!user) return;
       const priceStr = listPrice[tokenId];
-      const price = Number(priceStr);
-      if (!price || price <= 0) {
+      const price = Number((priceStr || "").replace(",", "."));
+      if (!Number.isFinite(price) || price <= 0) {
         alert("Zadaj cenu v €.");
         return;
       }
@@ -156,75 +170,59 @@ export default function BurzaTokenovPage() {
     [backend, user, fetchBalance, fetchListings]
   );
 
-  const handleBuyListing = useCallback(
-    async (listingId: string) => {
-      if (!user) return;
-      const res = await fetch(`${backend}/friday/buy-listing`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ buyerId: user.id, listingId }),
-      });
-      const data = await res.json();
-      if (res.ok && data?.success) {
-        alert("Token kúpený ✅");
-        await Promise.all([fetchBalance(), fetchListings()]);
-      } else {
-        alert(data?.message || "Kúpa zlyhala.");
-      }
-    },
-    [backend, user, fetchBalance, fetchListings]
-  );
+  // POZOR: backend aktuálne NEMÁ /friday/buy-listing → nekupujeme z FE
+  // Ak doplníš endpoint, ľahko to aktivuješ späť.
 
-  // v BurzaTokenovPage (len doplnky/úpravy)
+  const handleAdminMint = useCallback(async () => {
+    if (role !== "admin") return;
+    const qtyStr = prompt("Koľko tokenov chceš vytvoriť?");
+    const priceStr = prompt("Za akú cenu (€) ich chceš ponúknuť?");
+    const yearStr = prompt(`Pre aký rok? (default ${currentYear})`) || `${currentYear}`;
+    const q = Number(qtyStr);
+    const price = Number((priceStr || "").replace(",", "."));
+    const year = Number(yearStr);
 
-const handleAdminMint = useCallback(async () => {
-  if (role !== "admin") return;
-  const qtyStr = prompt("Koľko tokenov chceš vytvoriť?");
-  const priceStr = prompt("Za akú cenu (€) ich chceš ponúknuť?");
-  const yearStr = prompt(`Pre aký rok? (default ${currentYear})`) || `${currentYear}`;
-  const qty = Number(qtyStr);
-  const price = Number((priceStr || "").replace(",", "."));
-  const year = Number(yearStr);
+    if (!Number.isInteger(q) || q <= 0 || !Number.isFinite(price) || price <= 0 || !Number.isInteger(year)) {
+      alert("Neplatné vstupy.");
+      return;
+    }
 
-  if (!Number.isInteger(qty) || qty <= 0 || !Number.isFinite(price) || price <= 0 || !Number.isInteger(year)) {
-    alert("Neplatné vstupy.");
-    return;
-  }
+    const res = await fetch(`${backend}/friday/admin/mint`, {
+      method: "POST",
+      headers: await authHeaders(),
+      body: JSON.stringify({ quantity: q, priceEur: price, year }),
+    });
+    const data = await res.json();
+    if (res.ok && data?.success) {
+      alert(`Vytvorených ${q} tokenov pre rok ${year} @ ${price.toFixed(2)} €`);
+      await fetchSupply();
+    } else {
+      alert(data?.message || "Mint zlyhal.");
+    }
+  }, [backend, role, currentYear, fetchSupply, authHeaders]);
 
-  const res = await fetch(`${backend}/friday/admin/mint`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" /* + Authorization ak pridáš */ },
-    body: JSON.stringify({ quantity: qty, priceEur: price, year }),
-  });
-  const data = await res.json();
-  if (res.ok && data?.success) {
-    alert(`Vytvorených ${qty} tokenov pre rok ${year} @ ${price.toFixed(2)} €`);
-    await fetchSupply();
-  } else {
-    alert(data?.message || "Mint zlyhal.");
-  }
-}, [backend, role, currentYear, fetchSupply]);
+  const handleAdminSetPrice = useCallback(async () => {
+    if (role !== "admin") return;
+    const priceStr = prompt("Nová cena v pokladnici (€):");
+    const price = Number((priceStr || "").replace(",", "."));
+    if (!Number.isFinite(price) || price <= 0) {
+      alert("Neplatná cena.");
+      return;
+    }
 
-const handleAdminSetPrice = useCallback(async () => {
-  if (role !== "admin") return;
-  const priceStr = prompt("Nová cena v pokladnici (€):");
-  const price = Number((priceStr || "").replace(",", "."));
-  if (!Number.isFinite(price) || price <= 0) { alert("Neplatná cena."); return; }
-
-  const res = await fetch(`${backend}/friday/admin/set-price`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ priceEur: price }),
-  });
-  const data = await res.json();
-  if (res.ok && data?.success) {
-    alert(`Cena nastavená na ${price.toFixed(2)} €`);
-    await fetchSupply();
-  } else {
-    alert(data?.message || "Zmena ceny zlyhala.");
-  }
-}, [backend, role, fetchSupply]);
-
+    const res = await fetch(`${backend}/friday/admin/set-price`, {
+      method: "POST",
+      headers: await authHeaders(),
+      body: JSON.stringify({ newPrice: price, repriceTreasury: false }),
+    });
+    const data = await res.json();
+    if (res.ok && data?.success) {
+      alert(`Cena nastavená na ${price.toFixed(2)} €`);
+      await fetchSupply();
+    } else {
+      alert(data?.message || "Zmena ceny zlyhala.");
+    }
+  }, [backend, role, fetchSupply, authHeaders]);
 
   return (
     <main className="min-h-screen bg-gradient-to-br from-stone-100 via-emerald-50 to-amber-50 text-stone-800">
@@ -276,38 +274,39 @@ const handleAdminSetPrice = useCallback(async () => {
             </div>
           </section>
 
-            {role === "admin" && (
-              <section className="rounded-2xl bg-white/80 backdrop-blur shadow-sm border border-stone-200 p-5 mb-6">
-                <h2 className="text-lg font-semibold">Admin – pokladnica</h2>
-                <p className="text-sm text-stone-600 mt-1">
-                  Aktuálna cena: <span className="font-semibold">
-                    {supply ? supply.priceEur.toFixed(2) : "…"} €
-                  </span> • V pokladnici: <span className="font-semibold">
-                    {supply?.treasuryAvailable ?? 0}
-                  </span> tokenov (rok {currentYear})
-                </p>
-                <div className="mt-4 flex flex-wrap gap-3">
-                  <button
-                    onClick={handleAdminMint}
-                    className="px-4 py-2 rounded-xl bg-emerald-600 text-white shadow hover:bg-emerald-700 transition"
-                  >
-                    Vytvoriť tokeny
-                  </button>
-                  <button
-                    onClick={handleAdminSetPrice}
-                    className="px-4 py-2 rounded-xl bg-amber-500 text-white shadow hover:bg-amber-600 transition"
-                  >
-                    Zmeniť cenu
-                  </button>
-                  <button
-                    onClick={() => { fetchSupply(); fetchListings(); }}
-                    className="px-4 py-2 rounded-xl bg-stone-700 text-white shadow hover:bg-stone-800 transition"
-                  >
-                    Obnoviť
-                  </button>
-                </div>
-              </section>
-            )}
+          {role === "admin" && (
+            <section className="rounded-2xl bg-white/80 backdrop-blur shadow-sm border border-stone-200 p-5 mb-6">
+              <h2 className="text-lg font-semibold">Admin – pokladnica</h2>
+              <p className="text-sm text-stone-600 mt-1">
+                Aktuálna cena: <span className="font-semibold">{supply ? supply.priceEur.toFixed(2) : "…"} €</span> •
+                V pokladnici: <span className="font-semibold">{supply?.treasuryAvailable ?? 0}</span> tokenov (rok{" "}
+                {currentYear})
+              </p>
+              <div className="mt-4 flex flex-wrap gap-3">
+                <button
+                  onClick={handleAdminMint}
+                  className="px-4 py-2 rounded-xl bg-emerald-600 text-white shadow hover:bg-emerald-700 transition"
+                >
+                  Vytvoriť tokeny
+                </button>
+                <button
+                  onClick={handleAdminSetPrice}
+                  className="px-4 py-2 rounded-xl bg-amber-500 text-white shadow hover:bg-amber-600 transition"
+                >
+                  Zmeniť cenu
+                </button>
+                <button
+                  onClick={() => {
+                    fetchSupply();
+                    fetchListings();
+                  }}
+                  className="px-4 py-2 rounded-xl bg-stone-700 text-white shadow hover:bg-stone-800 transition"
+                >
+                  Obnoviť
+                </button>
+              </div>
+            </section>
+          )}
 
           {role !== "admin" && (
             <>
@@ -317,8 +316,7 @@ const handleAdminSetPrice = useCallback(async () => {
                 <p className="text-sm text-stone-600 mt-1">
                   Rok {currentYear} • Cena:{" "}
                   <span className="font-semibold">{supply ? supply.priceEur.toFixed(2) : "…"} €</span>/token •
-                  Dostupných v pokladnici:{" "}
-                  <span className="font-semibold">{supply?.treasuryAvailable ?? 0}</span>
+                  Dostupných v pokladnici: <span className="font-semibold">{supply?.treasuryAvailable ?? 0}</span>
                 </p>
                 <p className="text-xs text-stone-500 mt-1">
                   Limit: max 20 tokenov/rok/osoba. Aktuálne držíš {ownedThisYear} tokenov z {currentYear}.
@@ -328,7 +326,7 @@ const handleAdminSetPrice = useCallback(async () => {
                   <input
                     type="number"
                     min={1}
-                    max={Math.min(20, supply?.treasuryAvailable ?? 0)}
+                    max={Math.min(maxCanBuy, supply?.treasuryAvailable ?? 0)}
                     value={qty}
                     onChange={(e) => setQty(parseInt(e.target.value || "1", 10))}
                     className="w-24 px-3 py-2 rounded-xl border border-stone-300 bg-white"
@@ -389,16 +387,6 @@ const handleAdminSetPrice = useCallback(async () => {
                 </div>
               </section>
 
-              {/* Moje listované (zrušenie) */}
-              {tokensListed.length > 0 && (
-                <section className="rounded-2xl bg-white/80 backdrop-blur shadow-sm border border-stone-200 p-5 mb-6">
-                  <h2 className="text-lg font-semibold">Moje zalistované tokeny</h2>
-                  <div className="text-sm text-stone-600 mt-2">
-                    Zrušenie nájdeš priamo v sekcii burza pri položke tvojho listingu.
-                  </div>
-                </section>
-              )}
-
               {/* Burza */}
               <section className="rounded-2xl bg-white/80 backdrop-blur shadow-sm border border-stone-200 p-5">
                 <h2 className="text-lg font-semibold">Burza</h2>
@@ -416,9 +404,11 @@ const handleAdminSetPrice = useCallback(async () => {
                         </div>
                         <div className="text-xs text-stone-500">ID: {l.id.slice(0, 8)}…</div>
                         <div className="flex items-center gap-2 mt-2">
+                          {/* Backend zatiaľ nemá /friday/buy-listing → tlačidlo vypnuté */}
                           <button
-                            className="px-4 py-2 rounded-xl bg-amber-500 text-white shadow hover:bg-amber-600 transition"
-                            onClick={() => handleBuyListing(l.id)}
+                            className="px-4 py-2 rounded-xl bg-amber-500/60 text-white shadow cursor-not-allowed"
+                            title="Kúpa bude dostupná čoskoro"
+                            disabled
                           >
                             Kúpiť
                           </button>
