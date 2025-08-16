@@ -47,6 +47,8 @@ export default function BurzaTokenovPage() {
   const [qty, setQty] = useState<number>(1);
   const [listings, setListings] = useState<Listing[]>([]);
   const [listPrice, setListPrice] = useState<Record<string, string>>({});
+  const [buyingId, setBuyingId] = useState<string | null>(null);
+
 
   const tokensActive = useMemo(
     () => (balance?.tokens || []).filter((t) => t.status === "active" && t.minutesRemaining > 0),
@@ -125,6 +127,32 @@ export default function BurzaTokenovPage() {
       alert(data?.message || "Nákup zlyhal.");
     }
   }, [backend, user, qty, maxCanBuy, currentYear, fetchBalance, fetchSupply, supply]);
+
+
+  const handleBuyListing = useCallback(async (listingId: string) => {
+  if (!user) return;
+  try {
+    setBuyingId(listingId);
+    const res = await fetch(`${backend}/friday/buy-listing`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        // Ak budeš kontrolovať token na BE, odkomentuj:
+        // Authorization: `Bearer ${await getToken()}`,
+      },
+      body: JSON.stringify({ buyerId: user.id, listingId }),
+    });
+    const data = await res.json();
+    if (res.ok && data?.success) {
+      alert(`Kúpený token ${data.tokenId.slice(0,8)}… za ${Number(data.priceEur).toFixed(2)} € ✅`);
+      await Promise.all([fetchBalance(), fetchListings()]);
+    } else {
+      alert(data?.message || "Kúpa zlyhala.");
+    }
+  } finally {
+    setBuyingId(null);
+  }
+}, [backend, user, fetchBalance, fetchListings /*, getToken*/]);
 
   const handleListToken = useCallback(
     async (tokenId: string) => {
@@ -492,14 +520,20 @@ export default function BurzaTokenovPage() {
                         </div>
                         <div className="text-xs text-stone-500">ID: {l.id.slice(0, 8)}…</div>
                         <div className="flex items-center gap-2 mt-2">
-                          {/* Backend zatiaľ nemá /friday/buy-listing → tlačidlo vypnuté */}
                           <button
-                            className="px-4 py-2 rounded-xl bg-amber-500/60 text-white shadow cursor-not-allowed"
-                            title="Kúpa bude dostupná čoskoro"
-                            disabled
+                            onClick={() => handleBuyListing(l.id)}
+                            disabled={role === "admin" || user?.id === l.sellerId || buyingId === l.id}
+                            className={`px-4 py-2 rounded-xl text-white shadow transition
+                              ${role === "admin" || user?.id === l.sellerId
+                                ? "bg-stone-400 cursor-not-allowed"
+                                : buyingId === l.id
+                                  ? "bg-amber-400"
+                                  : "bg-amber-500 hover:bg-amber-600"}`}
+                            title={user?.id === l.sellerId ? "Nemôžeš kúpiť vlastný listing" : ""}
                           >
-                            Kúpiť
+                            {buyingId === l.id ? "Kupujem…" : "Kúpiť"}
                           </button>
+
                           {user?.id === l.sellerId && (
                             <button
                               className="px-4 py-2 rounded-xl bg-stone-700 text-white shadow hover:bg-stone-800 transition"
