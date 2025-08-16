@@ -274,39 +274,81 @@ export default function BurzaTokenovPage() {
             </div>
           </section>
 
-          {role === "admin" && (
-            <section className="rounded-2xl bg-white/80 backdrop-blur shadow-sm border border-stone-200 p-5 mb-6">
-              <h2 className="text-lg font-semibold">Admin – pokladnica</h2>
-              <p className="text-sm text-stone-600 mt-1">
-                Aktuálna cena: <span className="font-semibold">{supply ? supply.priceEur.toFixed(2) : "…"} €</span> •
-                V pokladnici: <span className="font-semibold">{supply?.treasuryAvailable ?? 0}</span> tokenov (rok{" "}
-                {currentYear})
-              </p>
-              <div className="mt-4 flex flex-wrap gap-3">
-                <button
-                  onClick={handleAdminMint}
-                  className="px-4 py-2 rounded-xl bg-emerald-600 text-white shadow hover:bg-emerald-700 transition"
-                >
-                  Vytvoriť tokeny
-                </button>
-                <button
-                  onClick={handleAdminSetPrice}
-                  className="px-4 py-2 rounded-xl bg-amber-500 text-white shadow hover:bg-amber-600 transition"
-                >
-                  Zmeniť cenu
-                </button>
-                <button
-                  onClick={() => {
-                    fetchSupply();
-                    fetchListings();
-                  }}
-                  className="px-4 py-2 rounded-xl bg-stone-700 text-white shadow hover:bg-stone-800 transition"
-                >
-                  Obnoviť
-                </button>
-              </div>
-            </section>
-          )}
+         {role === "admin" && (
+  <section className="rounded-2xl bg-white/80 backdrop-blur shadow-sm border border-stone-200 p-5 mb-6">
+    <h2 className="text-lg font-semibold">Admin – pokladnica</h2>
+    <p className="text-sm text-stone-600 mt-1">
+      Aktuálna cena: <span className="font-semibold">{supply ? supply.priceEur.toFixed(2) : "…"} €</span> •
+      V pokladnici: <span className="font-semibold">{supply?.treasuryAvailable ?? 0}</span> tokenov (rok{" "}
+      {currentYear})
+    </p>
+
+    {/* Nové inputy */}
+    <div className="mt-4 flex flex-col gap-3 max-w-sm">
+      <input
+        type="number"
+        min={1}
+        value={qty}
+        onChange={(e) => setQty(parseInt(e.target.value || "1", 10))}
+        className="w-full px-3 py-2 rounded-xl border border-stone-300 bg-white"
+        placeholder="Počet tokenov"
+      />
+      <input
+        type="number"
+        min={1}
+        step="0.01"
+        value={supply?.priceEur ?? ""}
+        onChange={(e) =>
+          setSupply((s) =>
+            s ? { ...s, priceEur: parseFloat(e.target.value || "0") } : { year: currentYear, priceEur: parseFloat(e.target.value || "0"), treasuryAvailable: 0, totalMinted: 0, totalSold: 0 }
+          )
+        }
+        className="w-full px-3 py-2 rounded-xl border border-stone-300 bg-white"
+        placeholder="Cena za token (€)"
+      />
+
+      <button
+        onClick={async () => {
+          const q = Number(qty);
+          const price = Number(supply?.priceEur);
+          if (!Number.isInteger(q) || q <= 0 || !Number.isFinite(price) || price <= 0) {
+            alert("Zadaj platný počet a cenu.");
+            return;
+          }
+
+          const res = await fetch(`${backend}/friday/admin/mint`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ quantity: q, priceEur: price }),
+          });
+          const data = await res.json();
+          if (res.ok && data?.success) {
+            alert(`Vytvorených ${q} tokenov pre rok ${currentYear} @ ${price.toFixed(2)} € ✅`);
+            await fetchSupply();
+          } else {
+            alert(data?.message || "Mint zlyhal.");
+          }
+        }}
+        className="px-4 py-2 rounded-xl bg-emerald-600 text-white shadow hover:bg-emerald-700 transition"
+      >
+        Vygenerovať tokeny
+      </button>
+    </div>
+
+    <div className="mt-4 flex flex-wrap gap-3">
+      <button
+        onClick={() => {
+          fetchSupply();
+          fetchListings();
+        }}
+        className="px-4 py-2 rounded-xl bg-stone-700 text-white shadow hover:bg-stone-800 transition"
+      >
+        Obnoviť
+      </button>
+    </div>
+  </section>
+)}
+
 
           {role !== "admin" && (
             <>
