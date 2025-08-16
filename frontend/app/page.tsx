@@ -263,20 +263,22 @@ export default function HomePage() {
     const init = async () => {
       if (!isSignedIn || !user) return;
 
-      // 1) Sync user do DB (server si vytiahne userId z Bearer JWT)
-      try {
-        const jwt = await getToken();
-        await fetch(`${backend}/sync-user`, {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            Authorization: `Bearer ${jwt}`,
-          },
-          body: JSON.stringify({}),
-        });
-      } catch (e) {
-        console.error("sync-user FE error:", e);
-      }
+      // 1) Sync user do DB (server si vytiahne userId z BODY)
+        try {
+          const jwt = await getToken(); // môže zostať, backend ho ignoruje
+          await fetch(`${backend}/sync-user`, {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              // Authorization môžeš nechať alebo vyhodiť – backend ho nečíta
+              Authorization: `Bearer ${jwt}`,
+            },
+            body: JSON.stringify({ userId: user.id }), // ✅ DOPLNIŤ userId
+          });
+        } catch (e) {
+          console.error("sync-user FE error:", e);
+        }
+
 
       // 2) Načítaj piatkový zostatok
       fetchFridayBalance();
@@ -420,20 +422,20 @@ export default function HomePage() {
         const token = await requestFcmToken();
         if (!token) return;
         const role = (user.publicMetadata.role as string) || "client";
-        const jwt = await getToken(); // 👈 PRIDANÉ
-
-        await fetch(`${backend}/register-fcm`, {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            Authorization: `Bearer ${jwt}`, // 👈 PRIDANÉ
-          },
-          body: JSON.stringify({
-            fcmToken: token,
-            role,
-            platform: "web",
-          }), // ❌ userId už neposielame
-        });
+        const jwt = await getToken(); // môže zostať
+          await fetch(`${backend}/register-fcm`, {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              Authorization: `Bearer ${jwt}`, // môže zostať
+            },
+            body: JSON.stringify({
+              userId: user.id,        // ✅ DOPLNIŤ userId
+              fcmToken: token,
+              role,
+              platform: "web",
+            }),
+          });
 
         setHasNotifications(true);
         if (typeof window !== "undefined") localStorage.setItem("fcm-enabled", "1");
