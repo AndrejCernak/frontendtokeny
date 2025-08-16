@@ -279,11 +279,10 @@ export default function BurzaTokenovPage() {
     <h2 className="text-lg font-semibold">Admin – pokladnica</h2>
     <p className="text-sm text-stone-600 mt-1">
       Aktuálna cena: <span className="font-semibold">{supply ? supply.priceEur.toFixed(2) : "…"} €</span> •
-      V pokladnici: <span className="font-semibold">{supply?.treasuryAvailable ?? 0}</span> tokenov (rok{" "}
-      {currentYear})
+      V pokladnici: <span className="font-semibold">{supply?.treasuryAvailable ?? 0}</span> tokenov (rok {currentYear})
     </p>
 
-    {/* Nové inputy */}
+    {/* Mintovanie */}
     <div className="mt-4 flex flex-col gap-3 max-w-sm">
       <input
         type="number"
@@ -300,7 +299,15 @@ export default function BurzaTokenovPage() {
         value={supply?.priceEur ?? ""}
         onChange={(e) =>
           setSupply((s) =>
-            s ? { ...s, priceEur: parseFloat(e.target.value || "0") } : { year: currentYear, priceEur: parseFloat(e.target.value || "0"), treasuryAvailable: 0, totalMinted: 0, totalSold: 0 }
+            s
+              ? { ...s, priceEur: parseFloat(e.target.value || "0") }
+              : {
+                  year: currentYear,
+                  priceEur: parseFloat(e.target.value || "0"),
+                  treasuryAvailable: 0,
+                  totalMinted: 0,
+                  totalSold: 0,
+                }
           )
         }
         className="w-full px-3 py-2 rounded-xl border border-stone-300 bg-white"
@@ -332,6 +339,45 @@ export default function BurzaTokenovPage() {
         className="px-4 py-2 rounded-xl bg-emerald-600 text-white shadow hover:bg-emerald-700 transition"
       >
         Vygenerovať tokeny
+      </button>
+    </div>
+
+    {/* NOVÝ BLOK: Zmeniť cenu */}
+    <div className="mt-6 flex flex-col gap-3 max-w-sm">
+      <input
+        type="number"
+        min={1}
+        step="0.01"
+        placeholder="Nová cena (€)"
+        onChange={(e) => setListPrice((s) => ({ ...s, newPrice: e.target.value }))}
+        value={listPrice["newPrice"] ?? ""}
+        className="w-full px-3 py-2 rounded-xl border border-stone-300 bg-white"
+      />
+      <button
+        onClick={async () => {
+          const price = Number((listPrice["newPrice"] || "").replace(",", "."));
+          if (!Number.isFinite(price) || price <= 0) {
+            alert("Zadaj platnú cenu.");
+            return;
+          }
+
+          const res = await fetch(`${backend}/friday/admin/set-price`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ newPrice: price, repriceTreasury: false }),
+          });
+          const data = await res.json();
+          if (res.ok && data?.success) {
+            alert(`Cena tokenov bola nastavená na ${price.toFixed(2)} € ✅`);
+            setListPrice((s) => ({ ...s, newPrice: "" }));
+            await fetchSupply();
+          } else {
+            alert(data?.message || "Zmena ceny zlyhala.");
+          }
+        }}
+        className="px-4 py-2 rounded-xl bg-green-600 text-white shadow hover:bg-green-700 transition"
+      >
+        Zmeniť cenu
       </button>
     </div>
 
