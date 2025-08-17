@@ -5,10 +5,6 @@ type CreatePCOpts = {
   getCallId?: () => string | null;
 };
 
-/**
- * Vytvorí nový RTCPeerConnection a pridá lokálny audio track JEDENKRÁT.
- * Ďalšie re-attache rieši attachMicToPc (nižšie) bez duplikovania m-lines.
- */
 export const createPeerConnection = (
   localStream: MediaStream,
   targetId: string,
@@ -19,7 +15,7 @@ export const createPeerConnection = (
     iceServers: [{ urls: ["stun:stun.l.google.com:19302"] }],
   });
 
-  // ✅ pridaj lokálny audio track iba na čerstvom PC
+  // pridaj lokálny audio track len raz pri čerstvom PC
   const audioTracks = localStream.getAudioTracks();
   if (audioTracks.length) {
     try {
@@ -47,31 +43,24 @@ export const createPeerConnection = (
 };
 
 /**
- * Bezpečne “pripne” mikrofón do existujúceho PC:
- * - ak je audio sender s trackom → ak je iný track, urob replaceTrack
- * - ak je sender bez tracku → replaceTrack
- * - ak nie je sender → addTrack (nevytvára ďalšie m-line; ostáva pri pôvodnej)
+ * Bezpečne “pripne” mikrofón do existujúceho PC bez duplicitných m-lines:
+ * - ak existuje audio sender → replaceTrack, ak je potrebné
+ * - inak vytvorí transceiver (sendrecv) a zoberie jeho sender
  */
 export const attachMicToPc = (pc: RTCPeerConnection, localStream: MediaStream) => {
   const track = localStream.getAudioTracks()[0];
   if (!track) return;
 
-  // nájdi existujúci audio sender, prípadne prázdneho sendera
-  let sender =
+  const existingSender =
     pc.getSenders().find((s) => s.track?.kind === "audio") ||
     pc.getSenders().find((s) => !s.track);
 
-  if (sender) {
-    if (sender.track !== track) {
-      try {
-        sender.replaceTrack(track);
-      } catch {}
-    }
-    return;
-  }
+  const ensuredSender =
+    existingSender ?? pc.addTransceiver("audio", { direction: "sendrecv" }).sender;
 
-  // fallback: ak by PC nemal žiadny sender (napr. po resete), pridaj track
-  try {
-    pc.addTrack(track, localStream);
-  } catch {}
+  if (ensuredSender.track !== track) {
+    try {
+      ensuredSender.replaceTrack(track);
+    } catch {}
+  }
 };
