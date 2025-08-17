@@ -54,7 +54,7 @@ export default function HomePage() {
   // ——— Media/WS helpers
   const remoteAudioRef = useRef<HTMLAudioElement>(null);
   const localStreamRef = useRef<MediaStream | null>(null);
-  const callTimerRef = useRef<NodeJS.Timeout | null>(null);
+  const callTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const peerIdRef = useRef<string | null>(null);
   const callIdRef = useRef<string | null>(null);
 
@@ -104,10 +104,23 @@ export default function HomePage() {
 
   const clearCallTimer = () => {
     if (callTimerRef.current) {
-      clearInterval(callTimerRef.current);
+      clearTimeout(callTimerRef.current); // ✅ správny cleanup pre setTimeout
       callTimerRef.current = null;
     }
   };
+
+  // tiché „prebudenie“ audio na iOS pred prvým play()
+  const nudgeAudio = useCallback(() => {
+    const a = remoteAudioRef.current;
+    if (!a) return;
+    try {
+      a.muted = true;
+      a.play().then(() => {
+        a.pause();
+        a.muted = false;
+      }).catch(() => {});
+    } catch {}
+  }, []);
 
   // 🔧 tvrdý lokálny reset peeru/streamov/audia bez WS správ
   const hardResetPeerLocally = useCallback(() => {
@@ -116,6 +129,7 @@ export default function HomePage() {
         pcRef.current.onicecandidate = null;
         pcRef.current.ontrack = null;
         pcRef.current.onconnectionstatechange = null;
+        pcRef.current.getSenders().forEach((s) => s.track && s.track.stop());
         pcRef.current.close();
       }
     } catch {}
@@ -141,7 +155,32 @@ export default function HomePage() {
     setInCall(false);
     peerIdRef.current = null;
     callIdRef.current = null;
+    clearCallTimer();
   }, []);
+
+  // helper: ak PC neexistuje alebo je closed/failed, vytvor nový
+  const ensureFreshPC = useCallback(
+    (targetId: string) => {
+      const stale =
+        pcRef.current &&
+        (pcRef.current.connectionState === "closed" ||
+          pcRef.current.connectionState === "failed");
+      if (!pcRef.current || stale) {
+        const newPc = createPeerConnection(
+          localStreamRef.current!,
+          targetId,
+          attachRemoteStream,
+          { getCallId: () => callIdRef.current }
+        );
+        attachPCGuards(newPc);
+        pcRef.current = newPc;
+        setPc(newPc);
+        peerIdRef.current = targetId;
+      }
+      return pcRef.current!;
+    },
+    [attachRemoteStream]
+  );
 
   // malý guard na PC stav (ak spadne, uprac, nech ďalšie volanie ide hneď)
   const attachPCGuards = useCallback(
@@ -157,10 +196,12 @@ export default function HomePage() {
   );
 
   const stopCall = useCallback(
-    async (targetId?: string) => {
+    async (targetId?: string, notify = true) => {
       try {
         const id = targetId ?? peerIdRef.current ?? undefined;
-        if (id) sendWS({ type: "end-call", targetId: id, callId: callIdRef.current });
+        if (id && notify) {
+          sendWS({ type: "end-call", targetId: id, callId: callIdRef.current });
+        }
 
         // Zavri PC a odstráň handlerov
         if (pcRef.current) {
@@ -168,13 +209,13 @@ export default function HomePage() {
           pcRef.current.ontrack = null;
           pcRef.current.onconnectionstatechange = null;
           pcRef.current.getSenders().forEach((s) => s.track && s.track.stop());
-          pcRef.current.close();
+          try { pcRef.current.close(); } catch {}
         }
         pcRef.current = null;
         setPc(null);
 
         // Zastav lokálne streamy
-        localStreamRef.current?.getTracks().forEach((t) => t.stop());
+        try { localStreamRef.current?.getTracks().forEach((t) => t.stop()); } catch {}
         localStreamRef.current = null;
 
         // Reset remote audio
@@ -254,6 +295,8 @@ export default function HomePage() {
     hardResetPeerLocally();
     callIdRef.current = null;
 
+    await nudgeAudio();
+
     if (isFriday) {
       const m = await fetchFridayBalance();
       if (m <= 0) {
@@ -297,13 +340,18 @@ export default function HomePage() {
     });
 
     setInCall(true);
+
+    // bezpečnostný timeout – ak sa call nespustí, uprac a nechaj usera skúsiť znova
     if (callTimerRef.current) clearTimeout(callTimerRef.current);
-callTimerRef.current = setTimeout(() => {
-  // ak sa doteraz nespustil hovor (server by poslal "call-started")
-  if (!pcRef.current || pcRef.current.connectionState === "new" || pcRef.current.connectionState === "connecting") {
-    hardResetPeerLocally(); // zruší PC/streamy/audio a vráti inCall=false
-  }
-}, 20000);
+    callTimerRef.current = setTimeout(() => {
+      if (
+        !pcRef.current ||
+        pcRef.current.connectionState === "new" ||
+        pcRef.current.connectionState === "connecting"
+      ) {
+        hardResetPeerLocally(); // zruší PC/streamy/audio a vráti inCall=false
+      }
+    }, 20000);
   }, [
     user,
     isFriday,
@@ -313,6 +361,7 @@ callTimerRef.current = setTimeout(() => {
     adminId,
     hardResetPeerLocally,
     attachPCGuards,
+    nudgeAudio,
   ]);
 
   const sendNewOffer = useCallback(
@@ -321,8 +370,8 @@ callTimerRef.current = setTimeout(() => {
         await startLocalStream();
       }
 
-      let pcToUse = pc;
-      if (!pcToUse) {
+      let pcToUse = pcRef.current;
+      if (!pcToUse || ["closed", "failed"].includes(pcToUse.connectionState)) {
         const newPc = createPeerConnection(
           localStreamRef.current!,
           targetId,
@@ -331,6 +380,7 @@ callTimerRef.current = setTimeout(() => {
         );
         attachPCGuards(newPc);
         setPc(newPc);
+        pcRef.current = newPc;
         peerIdRef.current = targetId;
         pcToUse = newPc;
       }
@@ -346,7 +396,7 @@ callTimerRef.current = setTimeout(() => {
         callId: callIdRef.current,
       });
     },
-    [pc, startLocalStream, attachRemoteStream, user, attachPCGuards]
+    [startLocalStream, attachRemoteStream, user, attachPCGuards]
   );
 
   // ===== INIT (sync-user, fetch balance, connect WS, fallback)
@@ -372,7 +422,7 @@ callTimerRef.current = setTimeout(() => {
       // 2) Načítaj piatkový zostatok
       fetchFridayBalance();
 
-      // 3) Pripoj WS
+      // 3) Pripoj WS (ponechávam tvoje API connectWS – ak máš verziu s JWT, uprav tu)
       connectWS(user.id, role, async (msg) => {
         if (msg.type === "incoming-call") {
           setIncomingCall({
@@ -399,30 +449,33 @@ callTimerRef.current = setTimeout(() => {
 
         if (msg.type === "end-call") {
           setIncomingCall(null);
-          await stopCall(msg.from as string | undefined);
+          await stopCall(undefined, false); // ✅ nepotvrdzuj späť
         }
 
-         if (msg.type === "call-locked") {
-          // zhasni banner
+        if (msg.type === "call-locked") {
+          // zhasni banner len ak sedí callId (viac zariadení admina)
           setIncomingCall((prev) => {
             if (prev && String(msg.callId) === prev.callId) return null;
             return prev;
           });
-          // 🔧 vyčisti aj prípadný pendingOffer
           setPendingOffer(null);
-          // (nechávam callIdRef ako je; ak chceš, môžeš ho resetnúť len pre admina)
         }
 
         if (msg.type === "webrtc-offer") {
-          const pcLocal = pcRef.current;
           const incomingCallId = typeof msg.callId === "string" ? msg.callId : null;
-          if (!pcLocal) {
+          callIdRef.current = incomingCallId ?? callIdRef.current;
+
+          // ak nemáme lokálny stream (po predchádzajúcom hovore), znova ho získaj
+          if (!localStreamRef.current) await startLocalStream();
+
+          // ak PC nie je alebo je zatvorený, odlož si offer a čakaj na accept (admin)
+          if (!pcRef.current || ["closed", "failed"].includes(pcRef.current.connectionState)) {
             setPendingOffer({
               offer: msg.offer as RTCSessionDescriptionInit,
               from: String(msg.callerId),
             });
-            callIdRef.current = incomingCallId ?? callIdRef.current;
           } else {
+            const pcLocal = ensureFreshPC(String(msg.callerId));
             await pcLocal.setRemoteDescription(
               new RTCSessionDescription(msg.offer as RTCSessionDescriptionInit)
             );
@@ -432,7 +485,7 @@ callTimerRef.current = setTimeout(() => {
               type: "webrtc-answer",
               targetId: msg.callerId,
               answer,
-              callId: incomingCallId ?? callIdRef.current,
+              callId: callIdRef.current,
             });
             try {
               remoteAudioRef.current?.play?.();
@@ -442,27 +495,12 @@ callTimerRef.current = setTimeout(() => {
 
         if (msg.type === "webrtc-answer") {
           if (!localStreamRef.current) await startLocalStream();
-
-          let pcLocal = pcRef.current;
-          if (!pcLocal) {
-            const newPc = createPeerConnection(
-              localStreamRef.current!,
-              msg.callerId as string,
-              attachRemoteStream,
-              { getCallId: () => callIdRef.current }
-            );
-            attachPCGuards(newPc);
-            setPc(newPc);
-            pcRef.current = newPc;
-            peerIdRef.current = msg.callerId as string;
-            pcLocal = newPc;
-          }
-
+          const pcLocal = ensureFreshPC(String(msg.callerId));
           await pcLocal.setRemoteDescription(
             new RTCSessionDescription(msg.answer as RTCSessionDescriptionInit)
           );
-
-          callIdRef.current = typeof msg.callId === "string" ? msg.callId : callIdRef.current;
+          callIdRef.current =
+            typeof msg.callId === "string" ? msg.callId : callIdRef.current;
           try {
             remoteAudioRef.current?.play?.();
           } catch {}
@@ -478,7 +516,8 @@ callTimerRef.current = setTimeout(() => {
         }
 
         if (msg.type === "request-offer") {
-          callIdRef.current = typeof msg.callId === "string" ? msg.callId : callIdRef.current;
+          callIdRef.current =
+            typeof msg.callId === "string" ? msg.callId : callIdRef.current;
           await sendNewOffer(String(msg.from));
         }
 
@@ -500,7 +539,8 @@ callTimerRef.current = setTimeout(() => {
             from: String(data.pending.callerId),
             callerName: String(data.pending.callerName),
           });
-          callIdRef.current = typeof data.pending.callId === "string" ? data.pending.callId : null;
+          callIdRef.current =
+            typeof data.pending.callId === "string" ? data.pending.callId : null;
         }
       } catch {}
     };
@@ -519,11 +559,12 @@ callTimerRef.current = setTimeout(() => {
         const data = await res.json();
         if (data?.pending) {
           setIncomingCall({
-            callId: data.pending.callId,
-            from: data.pending.callerId,
-            callerName: data.pending.callerName,
+            callId: String(data.pending.callId),
+            from: String(data.pending.callerId),
+            callerName: String(data.pending.callerName),
           });
-          callIdRef.current = data.pending.callId;
+          callIdRef.current =
+            typeof data.pending.callId === "string" ? data.pending.callId : null;
         }
       } catch {}
     };
@@ -545,6 +586,7 @@ callTimerRef.current = setTimeout(() => {
     backend,
     getToken,
     attachPCGuards,
+    ensureFreshPC,
   ]);
 
   // ===== Auto-register push on app start when already granted =====
