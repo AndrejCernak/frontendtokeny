@@ -9,27 +9,32 @@ let onMsg: ((m: WSMessage) => void) | null = null;
 let currentUserId: string | null = null;
 let currentRole: string | null = null;
 
-let queue: any[] = [];
-let reconnectTimer: any = null;
+let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 let backoff = 500; // ms (max ~5s)
 
+// front URL -> ws(s) URL
 const WS_URL = process.env.NEXT_PUBLIC_BACKEND_URL!
   .replace(/^http:/, "ws:")
   .replace(/^https:/, "wss:");
 
+// buffer správ kým nie sme OPEN
+const queue: WSMessage[] = [];
+
 function flushQueue() {
   if (!ws || ws.readyState !== WebSocket.OPEN) return;
   while (queue.length) {
-    const p = queue.shift();
+    const payload = queue.shift()!;
     try {
-      ws.send(JSON.stringify(p));
-    } catch (_) {}
+      ws.send(JSON.stringify(payload));
+    } catch {
+      // swallow
+    }
   }
 }
 
 function doRegister() {
   if (!ws || ws.readyState !== WebSocket.OPEN || !currentUserId) return;
-  const payload = { type: "register", userId: currentUserId, role: currentRole || undefined };
+  const payload: WSMessage = { type: "register", userId: currentUserId, role: currentRole || undefined };
   ws.send(JSON.stringify(payload));
 }
 
@@ -37,24 +42,23 @@ function setupSocket() {
   ws = new WebSocket(WS_URL);
 
   ws.onopen = () => {
-    console.log("✅ WebSocket connected");
+    // console.log("✅ WebSocket connected");
     backoff = 500;
     doRegister();
     flushQueue();
   };
 
-  ws.onmessage = (event) => {
+  ws.onmessage = (event: MessageEvent<string>) => {
     try {
-      const msg: WSMessage = JSON.parse(event.data);
-      // nič nefiltrujeme => callId prejde
-      onMsg && onMsg(msg);
+      const msg = JSON.parse(event.data) as WSMessage;
+      if (onMsg) onMsg(msg);
     } catch (err) {
-      console.error("❌ WS parse error:", err);
+      // console.error("❌ WS parse error:", err);
     }
   };
 
   ws.onclose = () => {
-    console.warn("⚠️ WebSocket disconnected");
+    // console.warn("⚠️ WebSocket disconnected");
     if (reconnectTimer) clearTimeout(reconnectTimer);
     reconnectTimer = setTimeout(() => {
       setupSocket();
@@ -62,17 +66,12 @@ function setupSocket() {
     }, backoff);
   };
 
-  ws.onerror = (err) => {
-    console.error("❌ WebSocket error:", err);
-    // onclose urobí reconnect
+  ws.onerror = () => {
+    // onclose spraví reconnect
   };
 }
 
-export const connectWS = (
-  userId: string,
-  role: string,
-  onMessage?: (msg: WSMessage) => void
-) => {
+export function connectWS(userId: string, role: string, onMessage?: (msg: WSMessage) => void) {
   currentUserId = userId;
   currentRole = role;
   onMsg = onMessage || null;
@@ -81,13 +80,10 @@ export const connectWS = (
     setupSocket();
   } else if (ws.readyState === WebSocket.OPEN) {
     doRegister();
-  } else {
-    // CONNECTING – zaregistrujeme po open
   }
-};
+}
 
-export const sendWS = (data: any) => {
-  // payload ponechávame tak, ako je (vrátane callId)
+export function sendWS(data: WSMessage) {
   if (ws && ws.readyState === WebSocket.OPEN) {
     ws.send(JSON.stringify(data));
   } else if (ws && ws.readyState === WebSocket.CONNECTING) {
@@ -100,9 +96,8 @@ export const sendWS = (data: any) => {
       { once: true }
     );
   } else {
-    console.warn("⏳ WS not connected, queueing payload");
+    // queue + prípadný bootstrap socketu
     queue.push(data);
-    // skúsime sa reconnectnúť ak socket nie je
     if (!ws || ws.readyState === WebSocket.CLOSED) setupSocket();
   }
-};
+}

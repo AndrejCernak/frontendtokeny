@@ -1,8 +1,8 @@
 // lib/webrtc.ts
-import { sendWS } from "./wsClient";
+import { sendWS, WSMessage } from "./wsClient";
 
 type CreatePCOpts = {
-  getCallId?: () => string | null; // vracia aktuálne callId (alebo null)
+  getCallId?: () => string | null;
 };
 
 export const createPeerConnection = (
@@ -15,26 +15,22 @@ export const createPeerConnection = (
     iceServers: [{ urls: ["stun:stun.l.google.com:19302"] }],
   });
 
-  // Pridať lokálny stream
   localStream.getTracks().forEach((track) => pc.addTrack(track, localStream));
 
-  // Vzdialený stream
-  pc.ontrack = (event) => {
-    if (event.streams && event.streams[0]) {
-      onRemoteStream(event.streams[0]);
-    }
+  pc.ontrack = (event: RTCTrackEvent) => {
+    const stream = event.streams?.[0];
+    if (stream) onRemoteStream(stream);
   };
 
-  // ICE kandidáti (pridáme callId)
-  pc.onicecandidate = (event) => {
+  pc.onicecandidate = (event: RTCPeerConnectionIceEvent) => {
     if (event.candidate) {
-      const callId = opts.getCallId ? opts.getCallId() : undefined;
-      sendWS({
+      const payload: WSMessage = {
         type: "webrtc-candidate",
         targetId,
         candidate: event.candidate.toJSON ? event.candidate.toJSON() : event.candidate,
-        callId,
-      });
+        callId: opts.getCallId ? opts.getCallId() : undefined,
+      };
+      sendWS(payload);
     }
   };
 
