@@ -1,56 +1,22 @@
-// lib/webrtc.ts
-import { sendWS, WSMessage } from "./wsClient";
+import { sendWS } from "./wsClient";
 
-type CreatePCOpts = { getCallId?: () => string | null };
+export const createPeerConnection = (localStream: MediaStream, targetId: string, onRemoteStream: (stream: MediaStream) => void) => {
+  const pc = new RTCPeerConnection();
 
-// Bez addTrack – budeme používať výhradne transceiver + replaceTrack
-export const createPeerConnection = (
-  _localStream: MediaStream,           // nechávam signatúru, ale tu ho nepoužívame
-  targetId: string,
-  onRemoteStream: (stream: MediaStream) => void,
-  opts: CreatePCOpts = {}
-) => {
-  const pc = new RTCPeerConnection({
-    iceServers: [{ urls: ["stun:stun.l.google.com:19302"] }],
-  });
+  // Pridať lokálny stream
+  localStream.getTracks().forEach(track => pc.addTrack(track, localStream));
 
-  // Vytvoríme si bidirectional audio m-line
-  pc.addTransceiver("audio", { direction: "sendrecv" });
-
-  pc.ontrack = (event: RTCTrackEvent) => {
-    const stream = event.streams?.[0];
-    if (stream) onRemoteStream(stream);
+  // Keď príde vzdialený stream
+  pc.ontrack = (event) => {
+    onRemoteStream(event.streams[0]);
   };
 
-  pc.onicecandidate = (event: RTCPeerConnectionIceEvent) => {
+  // ICE kandidáti
+  pc.onicecandidate = (event) => {
     if (event.candidate) {
-      const payload: WSMessage = {
-        type: "webrtc-candidate",
-        targetId,
-        candidate: event.candidate.toJSON ? event.candidate.toJSON() : event.candidate,
-        callId: opts.getCallId ? opts.getCallId() : undefined,
-      };
-      sendWS(payload);
+      sendWS({ type: "webrtc-candidate", targetId, candidate: event.candidate });
     }
   };
 
   return pc;
-};
-
-// Jediný bod pravdy na pripojenie mikrofónu do m-line
-export const attachMicToPc = (pc: RTCPeerConnection, localStream: MediaStream) => {
-  const track = localStream.getAudioTracks()[0];
-  if (!track) return;
-
-  // Skús nájsť existujúceho audio sendera (môže byť bez tracku)
-  let sender = pc.getSenders().find(s => s.track?.kind === "audio") 
-            || pc.getSenders().find(s => !s.track);
-
-  if (!sender) {
-    // Ak nie je, vytvor transceiver a zober jeho sender
-    const trans = pc.addTransceiver("audio", { direction: "sendrecv" });
-    sender = trans.sender;
-  }
-
-  try { sender.replaceTrack(track); } catch {}
 };

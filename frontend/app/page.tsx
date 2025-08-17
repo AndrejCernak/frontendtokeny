@@ -17,7 +17,7 @@ import {
 } from "react";
 import { requestFcmToken } from "@/lib/firebase";
 import { connectWS, sendWS } from "@/lib/wsClient";
-import { attachMicToPc, createPeerConnection } from "@/lib/webrtc";
+import { createPeerConnection } from "@/lib/webrtc";
 
 
 type IncomingCall = { callId: string; from: string; callerName: string };
@@ -94,7 +94,6 @@ export default function HomePage() {
 
     // ak už máme rozbehnutý PC (napr. admin klikol Prijať, stream dobehol až teraz)
     if (pcRef.current) {
-      attachMicToPc(pcRef.current, stream);
     }
   } catch (e) {
     console.error("❌ Mikrofón - getUserMedia failed", e);
@@ -278,7 +277,6 @@ export default function HomePage() {
     peerIdRef.current = targetId;
 
     // ✅ ešte raz explicitne pripoj mikrofón (ak by sa stream získal tesne predtým)
-    attachMicToPc(newPc, localStreamRef.current!);
 
 
       if (pendingOffer && pendingOffer.from === targetId) {
@@ -343,7 +341,6 @@ export default function HomePage() {
     peerIdRef.current = targetId;
 
     // ✅
-    attachMicToPc(newPc, localStreamRef.current!);
 
 
     const offer = await newPc.createOffer();
@@ -409,7 +406,6 @@ export default function HomePage() {
     }
 
     // ✅ doplň toto:
-    attachMicToPc(pcToUse, localStreamRef.current!);
 
     const offer = await pcToUse.createOffer({ iceRestart: true });
     await pcToUse.setLocalDescription(offer);
