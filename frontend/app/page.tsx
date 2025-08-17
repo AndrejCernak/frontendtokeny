@@ -244,49 +244,58 @@ export default function HomePage() {
 
   // ===== Accept / Call =====
   const handleAccept = useCallback(
-    async (targetId: string) => {
-      // pred prijatím si urob čistý stôl
-      hardResetPeerLocally();
+  async (targetId: string) => {
+    hardResetPeerLocally(); // čistý stôl
 
-      setIncomingCall(null);
-      if (!localStreamRef.current) await startLocalStream();
+    setIncomingCall(null);
 
-      const newPc = createPeerConnection(
-        localStreamRef.current!,
-        targetId,
-        attachRemoteStream,
-        { getCallId: () => callIdRef.current }
+    // 1) Získaj mikrofón (užívateľ klikol -> user gesture OK aj v iOS/Safari)
+    if (!localStreamRef.current) await startLocalStream();
+
+    // rýchla kontrola – ak nemáme audio track, upozorniť
+    const hasMic = !!localStreamRef.current?.getAudioTracks?.()[0];
+    if (!hasMic) {
+      alert("Mikrofón nebol nájdený alebo je zablokovaný v prehliadači.");
+      return;
+    }
+
+    // 2) Vytvor PC, ktoré hneď pridá lokálny track a transceiver
+    const newPc = createPeerConnection(
+      localStreamRef.current!,
+      targetId,
+      attachRemoteStream,
+      { getCallId: () => callIdRef.current }
+    );
+    attachPCGuards(newPc);
+    setPc(newPc);
+    pcRef.current = newPc;
+    peerIdRef.current = targetId;
+
+    // 3) Ak máme pending offer od volajúceho → najprv setRemote, potom answer
+    if (pendingOffer && pendingOffer.from === targetId) {
+      await newPc.setRemoteDescription(
+        new RTCSessionDescription(pendingOffer.offer)
       );
-      attachPCGuards(newPc);
-      setPc(newPc);
-      pcRef.current = newPc;
-      peerIdRef.current = targetId;
+      const answer = await newPc.createAnswer();
+      await newPc.setLocalDescription(answer);
+      sendWS({
+        type: "webrtc-answer",
+        targetId,
+        answer,
+        callId: callIdRef.current,
+      });
+      setPendingOffer(null);
+      try { remoteAudioRef.current?.play?.(); } catch {}
+    } else {
+      // inak si vyžiadaj fresh offer
+      sendWS({ type: "request-offer", targetId, callId: callIdRef.current });
+    }
 
-      if (pendingOffer && pendingOffer.from === targetId) {
-        await newPc.setRemoteDescription(
-          new RTCSessionDescription(pendingOffer.offer)
-        );
-        const answer = await newPc.createAnswer();
-        await newPc.setLocalDescription(answer);
-        sendWS({
-          type: "webrtc-answer",
-          targetId,
-          answer,
-          callId: callIdRef.current,
-        });
-        setPendingOffer(null);
-        try {
-          remoteAudioRef.current?.play?.();
-        } catch {}
-      } else {
-        // ak admin otvorí PWA až po push-ke, vyžiada si offer pre konkrétny callId
-        sendWS({ type: "request-offer", targetId, callId: callIdRef.current });
-      }
+    setInCall(true);
+  },
+  [startLocalStream, pendingOffer, attachRemoteStream, hardResetPeerLocally, attachPCGuards]
+);
 
-      setInCall(true);
-    },
-    [startLocalStream, pendingOffer, attachRemoteStream, hardResetPeerLocally, attachPCGuards]
-  );
 
   const handleCall = useCallback(async () => {
     if (!user) return;
