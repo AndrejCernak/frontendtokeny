@@ -1,9 +1,7 @@
 // lib/webrtc.ts
 import { sendWS } from "./wsClient";
 
-type CreatePCOpts = {
-  getCallId?: () => string | null;
-};
+type CreatePCOpts = { getCallId?: () => string | null };
 
 export const createPeerConnection = (
   localStream: MediaStream,
@@ -15,25 +13,23 @@ export const createPeerConnection = (
     iceServers: [{ urls: ["stun:stun.l.google.com:19302"] }],
   });
 
-  // pridaj lokálny audio track len raz pri čerstvom PC
-  const audioTracks = localStream.getAudioTracks();
-  if (audioTracks.length) {
-    try {
-      pc.addTrack(audioTracks[0], localStream);
-    } catch {}
+  // ✅ pridaj lokálny audio track iba pri čerstvom PC
+  const t = localStream.getAudioTracks()[0];
+  if (t) {
+    try { pc.addTrack(t, localStream); } catch {}
   }
 
-  pc.ontrack = (event: RTCTrackEvent) => {
-    const stream = event.streams?.[0];
-    if (stream) onRemoteStream(stream);
+  pc.ontrack = (ev: RTCTrackEvent) => {
+    const s = ev.streams?.[0];
+    if (s) onRemoteStream(s);
   };
 
-  pc.onicecandidate = (event: RTCPeerConnectionIceEvent) => {
-    if (event.candidate) {
+  pc.onicecandidate = (ev: RTCPeerConnectionIceEvent) => {
+    if (ev.candidate) {
       sendWS({
         type: "webrtc-candidate",
         targetId,
-        candidate: event.candidate.toJSON ? event.candidate.toJSON() : event.candidate,
+        candidate: ev.candidate.toJSON ? ev.candidate.toJSON() : ev.candidate,
         callId: opts.getCallId ? opts.getCallId() : undefined,
       });
     }
@@ -42,25 +38,23 @@ export const createPeerConnection = (
   return pc;
 };
 
-/**
- * Bezpečne “pripne” mikrofón do existujúceho PC bez duplicitných m-lines:
- * - ak existuje audio sender → replaceTrack, ak je potrebné
- * - inak vytvorí transceiver (sendrecv) a zoberie jeho sender
- */
 export const attachMicToPc = (pc: RTCPeerConnection, localStream: MediaStream) => {
   const track = localStream.getAudioTracks()[0];
   if (!track) return;
 
   const existingSender =
-    pc.getSenders().find((s) => s.track?.kind === "audio") ||
-    pc.getSenders().find((s) => !s.track);
+    pc.getSenders().find(s => s.track?.kind === "audio") ||
+    pc.getSenders().find(s => !s.track);
 
-  const ensuredSender =
-    existingSender ?? pc.addTransceiver("audio", { direction: "sendrecv" }).sender;
+  const sender = existingSender ?? null;
 
-  if (ensuredSender.track !== track) {
-    try {
-      ensuredSender.replaceTrack(track);
-    } catch {}
+  if (sender) {
+    if (sender.track !== track) {
+      try { sender.replaceTrack(track); } catch {}
+    }
+    return;
   }
+
+  // fallback: ak sender nie je, pridaj track (stále 1 m-line, lebo PC je čerstvý/alebo bez sendera)
+  try { pc.addTrack(track, localStream); } catch {}
 };
