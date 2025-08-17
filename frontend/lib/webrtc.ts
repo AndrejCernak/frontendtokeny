@@ -52,28 +52,30 @@ export const createPeerConnection = (
   };
 
   pc.onicecandidate = (event: RTCPeerConnectionIceEvent) => {
-    if (!event.candidate) return;
+  if (!event.candidate) return;
 
-    // ✅ žiadne 'any' – vytvoríme korektný RTCIceCandidateInit bez usernameFragment (je optional)
-    const c = event.candidate;
-    const candidateInit: RTCIceCandidateInit =
-      typeof (c as any).toJSON === "function"
-        ? (c as unknown as { toJSON: () => RTCIceCandidateInit }).toJSON()
-        : {
-            candidate: c.candidate,
-            sdpMid: c.sdpMid ?? undefined,
-            sdpMLineIndex: c.sdpMLineIndex ?? undefined,
-            // usernameFragment je nepovinný – vynecháme ho, aby sme sa vyhli any
-          };
+  const c: RTCIceCandidate = event.candidate;
 
-    const payload: WSMessage = {
-      type: "webrtc-candidate",
-      targetId,
-      candidate: candidateInit,
-      callId: opts.getCallId ? opts.getCallId() : undefined,
-    };
-    sendWS(payload);
+  // poskladaj RTCIceCandidateInit bez any
+  const candidateInit: RTCIceCandidateInit = {
+    candidate: c.candidate,
+    sdpMid: c.sdpMid ?? undefined,
+    sdpMLineIndex: c.sdpMLineIndex ?? undefined,
   };
+
+  // usernameFragment je optional a nemusí byť v type, pridaj cez type guard
+  const maybeUF = (c as RTCIceCandidate & { usernameFragment?: string }).usernameFragment;
+  if (maybeUF) candidateInit.usernameFragment = maybeUF;
+
+  const payload: WSMessage = {
+    type: "webrtc-candidate",
+    targetId,
+    candidate: candidateInit,
+    callId: opts.getCallId ? opts.getCallId() : undefined,
+  };
+  sendWS(payload);
+};
+
 
   return pc;
 };

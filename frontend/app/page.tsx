@@ -241,21 +241,17 @@ export default function HomePage() {
   // ===== Accept / Call =====
   const handleAccept = useCallback(
   async (targetId: string) => {
-    hardResetPeerLocally(); // čistý stôl
-
+    hardResetPeerLocally();
     setIncomingCall(null);
 
-    // 1) Získaj mikrofón (užívateľ klikol -> user gesture OK aj v iOS/Safari)
     if (!localStreamRef.current) await startLocalStream();
 
-    // rýchla kontrola – ak nemáme audio track, upozorniť
     const hasMic = !!localStreamRef.current?.getAudioTracks?.()[0];
     if (!hasMic) {
       alert("Mikrofón nebol nájdený alebo je zablokovaný v prehliadači.");
       return;
     }
 
-    // 2) Vytvor PC, ktoré hneď pridá lokálny track a transceiver
     const newPc = createPeerConnection(
       localStreamRef.current!,
       targetId,
@@ -266,30 +262,22 @@ export default function HomePage() {
     pcRef.current = newPc;
     peerIdRef.current = targetId;
 
-    // 3) Ak máme pending offer od volajúceho → najprv setRemote, potom answer
     if (pendingOffer && pendingOffer.from === targetId) {
-      await newPc.setRemoteDescription(
-        new RTCSessionDescription(pendingOffer.offer)
-      );
+      await newPc.setRemoteDescription(new RTCSessionDescription(pendingOffer.offer));
       const answer = await newPc.createAnswer();
       await newPc.setLocalDescription(answer);
-      sendWS({
-        type: "webrtc-answer",
-        targetId,
-        answer,
-        callId: callIdRef.current,
-      });
+      sendWS({ type: "webrtc-answer", targetId, answer, callId: callIdRef.current });
       setPendingOffer(null);
       try { remoteAudioRef.current?.play?.(); } catch {}
     } else {
-      // inak si vyžiadaj fresh offer
       sendWS({ type: "request-offer", targetId, callId: callIdRef.current });
     }
 
     setInCall(true);
   },
-  [startLocalStream, pendingOffer, attachRemoteStream, hardResetPeerLocally, attachPCGuards]
+  [startLocalStream, pendingOffer, attachRemoteStream, hardResetPeerLocally, attachPCGuards] // ← sem patrí deps array
 );
+
 
 
   const handleCall = useCallback(async () => {
