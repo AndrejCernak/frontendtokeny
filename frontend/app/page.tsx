@@ -17,7 +17,7 @@ import {
 } from "react";
 import { requestFcmToken } from "@/lib/firebase";
 import { connectWS, sendWS } from "@/lib/wsClient";
-import { createPeerConnection } from "@/lib/webrtc";
+import { attachMicToPc, createPeerConnection } from "@/lib/webrtc";
 
 
 type IncomingCall = { callId: string; from: string; callerName: string };
@@ -94,6 +94,7 @@ export default function HomePage() {
 
     // ak už máme rozbehnutý PC (napr. admin klikol Prijať, stream dobehol až teraz)
     if (pcRef.current) {
+      attachMicToPc(pcRef.current, stream);
     }
   } catch (e) {
     console.error("❌ Mikrofón - getUserMedia failed", e);
@@ -277,6 +278,7 @@ export default function HomePage() {
     peerIdRef.current = targetId;
 
     // ✅ ešte raz explicitne pripoj mikrofón (ak by sa stream získal tesne predtým)
+    attachMicToPc(newPc, localStreamRef.current!);
 
 
       if (pendingOffer && pendingOffer.from === targetId) {
@@ -341,6 +343,7 @@ export default function HomePage() {
     peerIdRef.current = targetId;
 
     // ✅
+    attachMicToPc(newPc, localStreamRef.current!);
 
 
     const offer = await newPc.createOffer();
@@ -406,6 +409,7 @@ export default function HomePage() {
     }
 
     // ✅ doplň toto:
+    attachMicToPc(pcToUse, localStreamRef.current!);
 
     const offer = await pcToUse.createOffer({ iceRestart: true });
     await pcToUse.setLocalDescription(offer);
@@ -483,36 +487,18 @@ export default function HomePage() {
         }
 
         if (msg.type === "webrtc-offer") {
-          const incomingCallId = typeof msg.callId === "string" ? msg.callId : null;
-          callIdRef.current = incomingCallId ?? callIdRef.current;
+  const incomingCallId = typeof msg.callId === "string" ? msg.callId : null;
+  callIdRef.current = incomingCallId ?? callIdRef.current;
 
-          // ak nemáme lokálny stream (po predchádzajúcom hovore), znova ho získaj
-          if (!localStreamRef.current) await startLocalStream();
+  // ✅ IBA uložiť ponuku a počkať na klik „Prijať“
+  setPendingOffer({
+    offer: msg.offer as RTCSessionDescriptionInit,
+    from: String(msg.callerId),
+  });
 
-          // ak PC nie je alebo je zatvorený, odlož si offer a čakaj na accept (admin)
-          if (!pcRef.current || ["closed", "failed"].includes(pcRef.current.connectionState)) {
-            setPendingOffer({
-              offer: msg.offer as RTCSessionDescriptionInit,
-              from: String(msg.callerId),
-            });
-          } else {
-            const pcLocal = ensureFreshPC(String(msg.callerId));
-            await pcLocal.setRemoteDescription(
-              new RTCSessionDescription(msg.offer as RTCSessionDescriptionInit)
-            );
-            const answer = await pcLocal.createAnswer();
-            await pcLocal.setLocalDescription(answer);
-            sendWS({
-              type: "webrtc-answer",
-              targetId: msg.callerId,
-              answer,
-              callId: callIdRef.current,
-            });
-            try {
-              remoteAudioRef.current?.play?.();
-            } catch {}
-          }
-        }
+  // (nič viac tu nerob – žiadne startLocalStream, žiadne setRemoteDescription/answer)
+}
+
 
         if (msg.type === "webrtc-answer") {
           if (!localStreamRef.current) await startLocalStream();
