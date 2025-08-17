@@ -57,7 +57,6 @@ export default function HomePage() {
   const callTimerRef = useRef<NodeJS.Timeout | null>(null);
   const peerIdRef = useRef<string | null>(null);
   const callIdRef = useRef<string | null>(null);
-  
 
   const [pendingOffer, setPendingOffer] = useState<{
     offer: RTCSessionDescriptionInit;
@@ -77,50 +76,13 @@ export default function HomePage() {
     return m;
   }, [backend, user]);
 
-
-  // úplne hore pri ostatných useCallback/helperoch v page.tsx
-const hardResetPeerLocally = useCallback(() => {
-  try {
-    if (pcRef.current) {
-      pcRef.current.onicecandidate = null;
-      pcRef.current.ontrack = null;
-      // voliteľne:
-      pcRef.current.onconnectionstatechange = null;
-      pcRef.current.close();
-    }
-  } catch {}
-  pcRef.current = null;
-  setPc(null);
-
-  try {
-    localStreamRef.current?.getTracks().forEach(t => t.stop());
-  } catch {}
-  localStreamRef.current = null;
-
-  if (remoteAudioRef.current) {
-    try {
-      remoteAudioRef.current.srcObject = null;
-      remoteAudioRef.current.pause();
-      remoteAudioRef.current.currentTime = 0;
-    } catch {}
-  }
-
-  setPendingOffer(null);
-  setIncomingCall(null);
-  setIsMuted(false);
-  setInCall(false);
-  peerIdRef.current = null;
-  callIdRef.current = null;
-}, []);
-
-
   const startLocalStream = useCallback(async () => {
     try {
       localStreamRef.current = await navigator.mediaDevices.getUserMedia({
         audio: true,
       });
-    } catch (err) {
-      console.error("❌ Mikrofón:", err);
+    } catch {
+      console.error("❌ Mikrofón - getUserMedia failed");
       alert("Nepodarilo sa získať prístup k mikrofónu.");
     }
   }, []);
@@ -147,53 +109,104 @@ const hardResetPeerLocally = useCallback(() => {
     }
   };
 
-  const stopCall = useCallback(async (targetId?: string) => {
-  try {
-    const id = targetId ?? peerIdRef.current ?? undefined;
-    if (id) sendWS({ type: "end-call", targetId: id, callId: callIdRef.current });
-
-    // Zavri PC a odstráň handlerov
-    if (pcRef.current) {
-      pcRef.current.onicecandidate = null;
-      pcRef.current.ontrack = null;
-      pcRef.current.getSenders().forEach(s => s.track && s.track.stop());
-      pcRef.current.close();
-    }
+  // 🔧 tvrdý lokálny reset peeru/streamov/audia bez WS správ
+  const hardResetPeerLocally = useCallback(() => {
+    try {
+      if (pcRef.current) {
+        pcRef.current.onicecandidate = null;
+        pcRef.current.ontrack = null;
+        pcRef.current.onconnectionstatechange = null;
+        pcRef.current.close();
+      }
+    } catch {}
     pcRef.current = null;
     setPc(null);
 
-    // Zastav lokálne streamy
-    localStreamRef.current?.getTracks().forEach(t => t.stop());
+    try {
+      localStreamRef.current?.getTracks().forEach((t) => t.stop());
+    } catch {}
     localStreamRef.current = null;
 
-    // 🔧 Reset remote audio – inak niekedy prehliadač blokne ďalšie autoPlay
     if (remoteAudioRef.current) {
       try {
-        remoteAudioRef.current.srcObject = null; // HTMLAudioElement dedí srcObject z HTMLMediaElement
+        remoteAudioRef.current.srcObject = null;
         remoteAudioRef.current.pause();
         remoteAudioRef.current.currentTime = 0;
       } catch {}
     }
 
-
-    // Vyčisti interný stav
-    clearCallTimer();
     setPendingOffer(null);
     setIncomingCall(null);
     setIsMuted(false);
     setInCall(false);
-  } finally {
     peerIdRef.current = null;
     callIdRef.current = null;
-    await fetchFridayBalance();
-  }
-}, [fetchFridayBalance]);
+  }, []);
 
+  // malý guard na PC stav (ak spadne, uprac, nech ďalšie volanie ide hneď)
+  const attachPCGuards = useCallback(
+    (peer: RTCPeerConnection) => {
+      peer.onconnectionstatechange = () => {
+        const s = peer.connectionState;
+        if (s === "failed" || s === "closed") {
+          hardResetPeerLocally();
+        }
+      };
+    },
+    [hardResetPeerLocally]
+  );
+
+  const stopCall = useCallback(
+    async (targetId?: string) => {
+      try {
+        const id = targetId ?? peerIdRef.current ?? undefined;
+        if (id) sendWS({ type: "end-call", targetId: id, callId: callIdRef.current });
+
+        // Zavri PC a odstráň handlerov
+        if (pcRef.current) {
+          pcRef.current.onicecandidate = null;
+          pcRef.current.ontrack = null;
+          pcRef.current.onconnectionstatechange = null;
+          pcRef.current.getSenders().forEach((s) => s.track && s.track.stop());
+          pcRef.current.close();
+        }
+        pcRef.current = null;
+        setPc(null);
+
+        // Zastav lokálne streamy
+        localStreamRef.current?.getTracks().forEach((t) => t.stop());
+        localStreamRef.current = null;
+
+        // Reset remote audio
+        if (remoteAudioRef.current) {
+          try {
+            remoteAudioRef.current.srcObject = null;
+            remoteAudioRef.current.pause();
+            remoteAudioRef.current.currentTime = 0;
+          } catch {}
+        }
+
+        // Vyčisti interný stav
+        clearCallTimer();
+        setPendingOffer(null);
+        setIncomingCall(null);
+        setIsMuted(false);
+        setInCall(false);
+      } finally {
+        peerIdRef.current = null;
+        callIdRef.current = null;
+        await fetchFridayBalance();
+      }
+    },
+    [fetchFridayBalance]
+  );
 
   // ===== Accept / Call =====
   const handleAccept = useCallback(
     async (targetId: string) => {
+      // pred prijatím si urob čistý stôl
       hardResetPeerLocally();
+
       setIncomingCall(null);
       if (!localStreamRef.current) await startLocalStream();
 
@@ -201,8 +214,9 @@ const hardResetPeerLocally = useCallback(() => {
         localStreamRef.current!,
         targetId,
         attachRemoteStream,
-        { getCallId: () => callIdRef.current }   // <= pridané
+        { getCallId: () => callIdRef.current }
       );
+      attachPCGuards(newPc);
       setPc(newPc);
       pcRef.current = newPc;
       peerIdRef.current = targetId;
@@ -230,13 +244,15 @@ const hardResetPeerLocally = useCallback(() => {
 
       setInCall(true);
     },
-    [startLocalStream, pendingOffer, attachRemoteStream]
+    [startLocalStream, pendingOffer, attachRemoteStream, hardResetPeerLocally, attachPCGuards]
   );
 
   const handleCall = useCallback(async () => {
     if (!user) return;
 
+    // pred novým hovorom vždy urob čistý lokálny reset
     hardResetPeerLocally();
+    callIdRef.current = null;
 
     if (isFriday) {
       const m = await fetchFridayBalance();
@@ -257,9 +273,9 @@ const hardResetPeerLocally = useCallback(() => {
       localStreamRef.current!,
       targetId,
       attachRemoteStream,
-      { getCallId: () => callIdRef.current }   // <= pridané
-
+      { getCallId: () => callIdRef.current }
     );
+    attachPCGuards(newPc);
     setPc(newPc);
     pcRef.current = newPc;
     peerIdRef.current = targetId;
@@ -288,6 +304,8 @@ const hardResetPeerLocally = useCallback(() => {
     startLocalStream,
     attachRemoteStream,
     adminId,
+    hardResetPeerLocally,
+    attachPCGuards,
   ]);
 
   const sendNewOffer = useCallback(
@@ -302,9 +320,9 @@ const hardResetPeerLocally = useCallback(() => {
           localStreamRef.current!,
           targetId,
           attachRemoteStream,
-            { getCallId: () => callIdRef.current }   // <= pridané
-
+          { getCallId: () => callIdRef.current }
         );
+        attachPCGuards(newPc);
         setPc(newPc);
         peerIdRef.current = targetId;
         pcToUse = newPc;
@@ -321,7 +339,7 @@ const hardResetPeerLocally = useCallback(() => {
         callId: callIdRef.current,
       });
     },
-    [pc, startLocalStream, attachRemoteStream, user]
+    [pc, startLocalStream, attachRemoteStream, user, attachPCGuards]
   );
 
   // ===== INIT (sync-user, fetch balance, connect WS, fallback)
@@ -340,8 +358,8 @@ const hardResetPeerLocally = useCallback(() => {
           },
           body: JSON.stringify({}),
         });
-      } catch (e) {
-        console.error("sync-user FE error:", e);
+      } catch {
+        console.error("sync-user FE error");
       }
 
       // 2) Načítaj piatkový zostatok
@@ -357,7 +375,6 @@ const hardResetPeerLocally = useCallback(() => {
           });
           callIdRef.current = typeof msg.callId === "string" ? msg.callId : null;
         }
-
 
         if (msg.type === "insufficient-friday-tokens") {
           alert(
@@ -399,36 +416,39 @@ const hardResetPeerLocally = useCallback(() => {
               answer,
               callId: incomingCallId ?? callIdRef.current,
             });
-            try { remoteAudioRef.current?.play?.(); } catch {}
+            try {
+              remoteAudioRef.current?.play?.();
+            } catch {}
           }
         }
 
-
         if (msg.type === "webrtc-answer") {
-  if (!localStreamRef.current) await startLocalStream();
+          if (!localStreamRef.current) await startLocalStream();
 
-      let pcLocal = pcRef.current;
-      if (!pcLocal) {
-        const newPc = createPeerConnection(
-          localStreamRef.current!,
-          msg.callerId as string,
-          attachRemoteStream,
-          { getCallId: () => callIdRef.current }
-        );
-        setPc(newPc);
-        pcRef.current = newPc;
-        peerIdRef.current = msg.callerId as string;
-        pcLocal = newPc;
-      }
+          let pcLocal = pcRef.current;
+          if (!pcLocal) {
+            const newPc = createPeerConnection(
+              localStreamRef.current!,
+              msg.callerId as string,
+              attachRemoteStream,
+              { getCallId: () => callIdRef.current }
+            );
+            attachPCGuards(newPc);
+            setPc(newPc);
+            pcRef.current = newPc;
+            peerIdRef.current = msg.callerId as string;
+            pcLocal = newPc;
+          }
 
-      await pcLocal.setRemoteDescription(
-        new RTCSessionDescription(msg.answer as RTCSessionDescriptionInit)
-      );
+          await pcLocal.setRemoteDescription(
+            new RTCSessionDescription(msg.answer as RTCSessionDescriptionInit)
+          );
 
-      callIdRef.current = typeof msg.callId === "string" ? msg.callId : callIdRef.current;
-      try { remoteAudioRef.current?.play?.(); } catch {}
-    }
-
+          callIdRef.current = typeof msg.callId === "string" ? msg.callId : callIdRef.current;
+          try {
+            remoteAudioRef.current?.play?.();
+          } catch {}
+        }
 
         if (msg.type === "webrtc-candidate") {
           const pcLocal = pcRef.current;
@@ -442,8 +462,7 @@ const hardResetPeerLocally = useCallback(() => {
         if (msg.type === "request-offer") {
           callIdRef.current = typeof msg.callId === "string" ? msg.callId : callIdRef.current;
           await sendNewOffer(String(msg.from));
-}
-
+        }
 
         if (msg.type === "friday-balance-update") {
           setFridayMinutesRemaining(msg.minutesRemaining as number);
@@ -507,6 +526,7 @@ const hardResetPeerLocally = useCallback(() => {
     sendNewOffer,
     backend,
     getToken,
+    attachPCGuards,
   ]);
 
   // ===== Auto-register push on app start when already granted =====
@@ -535,7 +555,7 @@ const hardResetPeerLocally = useCallback(() => {
 
         setHasNotifications(true);
         if (typeof window !== "undefined") localStorage.setItem("fcm-enabled", "1");
-      } catch (_) {}
+      } catch {}
     };
     autoRegisterPush();
   }, [isSignedIn, user, backend, getToken]);
