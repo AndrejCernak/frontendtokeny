@@ -7,7 +7,7 @@ import {
   SignInButton,
   UserButton,
 } from "@clerk/nextjs";
-import { useAuth } from "@clerk/nextjs"; // 👈 PRIDANÉ
+import { useAuth } from "@clerk/nextjs";
 import {
   useEffect,
   useRef,
@@ -19,13 +19,7 @@ import { requestFcmToken } from "@/lib/firebase";
 import { connectWS, sendWS } from "@/lib/wsClient";
 import { createPeerConnection } from "@/lib/webrtc";
 
-type IncomingCall = { from: string; callerName: string };
-
-function formatSeconds(s: number) {
-  const m = Math.floor(s / 60);
-  const sec = s % 60;
-  return `${m} min ${sec}s`;
-}
+type IncomingCall = { callId: string; from: string; callerName: string };
 
 function isFridayInBratislava(d = new Date()) {
   const local = new Date(
@@ -36,7 +30,7 @@ function isFridayInBratislava(d = new Date()) {
 
 export default function HomePage() {
   const { user, isSignedIn } = useUser();
-  const { getToken } = useAuth(); // 👈 PRIDANÉ
+  const { getToken } = useAuth();
   const role = (user?.publicMetadata.role as string) || "client";
 
   // ——— Call state
@@ -62,6 +56,7 @@ export default function HomePage() {
   const localStreamRef = useRef<MediaStream | null>(null);
   const callTimerRef = useRef<NodeJS.Timeout | null>(null);
   const peerIdRef = useRef<string | null>(null);
+  const callIdRef = useRef<string | null>(null);
 
   const [pendingOffer, setPendingOffer] = useState<{
     offer: RTCSessionDescriptionInit;
@@ -119,7 +114,7 @@ export default function HomePage() {
       try {
         const id = targetId ?? peerIdRef.current ?? undefined;
         if (id) {
-          sendWS({ type: "end-call", targetId: id });
+          sendWS({ type: "end-call", targetId: id, callId: callIdRef.current });
         }
 
         if (pcRef.current) {
@@ -139,6 +134,7 @@ export default function HomePage() {
         setPendingOffer(null);
       } finally {
         peerIdRef.current = null;
+        callIdRef.current = null;
         await fetchFridayBalance();
       }
     },
@@ -166,13 +162,19 @@ export default function HomePage() {
         );
         const answer = await newPc.createAnswer();
         await newPc.setLocalDescription(answer);
-        sendWS({ type: "webrtc-answer", targetId, answer });
+        sendWS({
+          type: "webrtc-answer",
+          targetId,
+          answer,
+          callId: callIdRef.current,
+        });
         setPendingOffer(null);
         try {
           remoteAudioRef.current?.play?.();
         } catch {}
       } else {
-        sendWS({ type: "request-offer", targetId });
+        // ak admin otvorí PWA až po push-ke, vyžiada si offer pre konkrétny callId
+        sendWS({ type: "request-offer", targetId, callId: callIdRef.current });
       }
 
       setInCall(true);
@@ -215,7 +217,13 @@ export default function HomePage() {
       targetId,
       callerName: user?.fullName || "Neznámy",
     });
-    sendWS({ type: "webrtc-offer", targetId, offer, callerId: user?.id });
+    sendWS({
+      type: "webrtc-offer",
+      targetId,
+      offer,
+      callerId: user?.id,
+      callId: callIdRef.current,
+    });
 
     setInCall(true);
   }, [
@@ -253,12 +261,13 @@ export default function HomePage() {
         targetId,
         offer,
         callerId: user?.id,
+        callId: callIdRef.current,
       });
     },
     [pc, startLocalStream, attachRemoteStream, user]
   );
 
-  // ===== INIT (sync-user, fetch balance, connect WS)
+  // ===== INIT (sync-user, fetch balance, connect WS, fallback)
   useEffect(() => {
     const init = async () => {
       if (!isSignedIn || !user) return;
@@ -285,10 +294,13 @@ export default function HomePage() {
       connectWS(user.id, role, async (msg) => {
         if (msg.type === "incoming-call") {
           setIncomingCall({
-            from: msg.callerId as string,
-            callerName: msg.callerName as string,
+            callId: String(msg.callId),
+            from: String(msg.callerId),
+            callerName: String(msg.callerName),
           });
+          callIdRef.current = typeof msg.callId === "string" ? msg.callId : null;
         }
+
 
         if (msg.type === "insufficient-friday-tokens") {
           alert(
@@ -311,23 +323,29 @@ export default function HomePage() {
 
         if (msg.type === "webrtc-offer") {
           const pcLocal = pcRef.current;
+          const incomingCallId = typeof msg.callId === "string" ? msg.callId : null;
           if (!pcLocal) {
             setPendingOffer({
               offer: msg.offer as RTCSessionDescriptionInit,
-              from: msg.callerId as string,
+              from: String(msg.callerId),
             });
+            callIdRef.current = incomingCallId ?? callIdRef.current;
           } else {
             await pcLocal.setRemoteDescription(
               new RTCSessionDescription(msg.offer as RTCSessionDescriptionInit)
             );
             const answer = await pcLocal.createAnswer();
             await pcLocal.setLocalDescription(answer);
-            sendWS({ type: "webrtc-answer", targetId: msg.callerId, answer });
-            try {
-              remoteAudioRef.current?.play?.();
-            } catch {}
+            sendWS({
+              type: "webrtc-answer",
+              targetId: msg.callerId,
+              answer,
+              callId: incomingCallId ?? callIdRef.current,
+            });
+            try { remoteAudioRef.current?.play?.(); } catch {}
           }
         }
+
 
         if (msg.type === "webrtc-answer") {
           if (!localStreamRef.current) await startLocalStream();
@@ -348,9 +366,11 @@ export default function HomePage() {
           await pcLocal.setRemoteDescription(
             new RTCSessionDescription(msg.answer as RTCSessionDescriptionInit)
           );
-          try {
-            remoteAudioRef.current?.play?.();
-          } catch {}
+          await pcLocal.setRemoteDescription(
+            new RTCSessionDescription(msg.answer as RTCSessionDescriptionInit)
+          );
+          callIdRef.current = typeof msg.callId === "string" ? msg.callId : callIdRef.current;
+          try { remoteAudioRef.current?.play?.(); } catch {}
         }
 
         if (msg.type === "webrtc-candidate") {
@@ -363,19 +383,61 @@ export default function HomePage() {
         }
 
         if (msg.type === "request-offer") {
-          const adminId = msg.from as string;
-          await sendNewOffer(adminId);
-        }
+          callIdRef.current = typeof msg.callId === "string" ? msg.callId : callIdRef.current;
+          await sendNewOffer(String(msg.from));
+}
+
 
         if (msg.type === "friday-balance-update") {
           setFridayMinutesRemaining(msg.minutesRemaining as number);
         }
       });
+
+      // 4) REST fallback – ak ušla WS správa alebo sa app otvorila z pushky
+      try {
+        const jwt = await getToken();
+        const res = await fetch(`${backend}/calls/pending`, {
+          headers: { Authorization: `Bearer ${jwt}` },
+        });
+        const data = await res.json();
+        if (data?.pending) {
+          setIncomingCall({
+            callId: String(data.pending.callId),
+            from: String(data.pending.callerId),
+            callerName: String(data.pending.callerName),
+          });
+          callIdRef.current = typeof data.pending.callId === "string" ? data.pending.callId : null;
+        }
+      } catch {}
     };
 
     init();
+
+    // keď sa tab stane viditeľným (otvorenie z notifikácie), skús znova REST fallback
+    const onVis = async () => {
+      if (document.visibilityState !== "visible") return;
+      if (!isSignedIn || !user) return;
+      const jwt = await getToken();
+      try {
+        const res = await fetch(`${backend}/calls/pending`, {
+          headers: { Authorization: `Bearer ${jwt}` },
+        });
+        const data = await res.json();
+        if (data?.pending) {
+          setIncomingCall({
+            callId: data.pending.callId,
+            from: data.pending.callerId,
+            callerName: data.pending.callerName,
+          });
+          callIdRef.current = data.pending.callId;
+        }
+      } catch {}
+    };
+    document.addEventListener("visibilitychange", onVis);
+
     return () => {
       clearCallTimer();
+      document.removeEventListener("visibilitychange", onVis);
     };
   }, [
     isSignedIn,
@@ -387,29 +449,8 @@ export default function HomePage() {
     stopCall,
     sendNewOffer,
     backend,
-    getToken, // 👈 PRIDANÉ
+    getToken,
   ]);
-
-  useEffect(() => {
-    (async () => {
-      if (pendingOffer && pcRef.current) {
-        try {
-          await pcRef.current.setRemoteDescription(
-            new RTCSessionDescription(pendingOffer.offer)
-          );
-          const answer = await pcRef.current.createAnswer();
-          await pcRef.current.setLocalDescription(answer);
-          sendWS({ type: "webrtc-answer", targetId: pendingOffer.from, answer });
-          setPendingOffer(null);
-          try {
-            remoteAudioRef.current?.play?.();
-          } catch {}
-        } catch (e) {
-          console.error("auto-accept pendingOffer failed:", e);
-        }
-      }
-    })();
-  }, [pendingOffer]);
 
   // ===== Auto-register push on app start when already granted =====
   useEffect(() => {
@@ -420,19 +461,19 @@ export default function HomePage() {
         const token = await requestFcmToken();
         if (!token) return;
         const role = (user.publicMetadata.role as string) || "client";
-        const jwt = await getToken(); // 👈 PRIDANÉ
+        const jwt = await getToken();
 
         await fetch(`${backend}/register-fcm`, {
           method: "POST",
           headers: {
             "Content-Type": "application/json",
-            Authorization: `Bearer ${jwt}`, // 👈 PRIDANÉ
+            Authorization: `Bearer ${jwt}`,
           },
           body: JSON.stringify({
             fcmToken: token,
             role,
             platform: "web",
-          }), // ❌ userId už neposielame
+          }),
         });
 
         setHasNotifications(true);
@@ -440,7 +481,7 @@ export default function HomePage() {
       } catch (_) {}
     };
     autoRegisterPush();
-  }, [isSignedIn, user, backend, getToken]); // 👈 PRIDANÉ getToken
+  }, [isSignedIn, user, backend, getToken]);
 
   const handleEnableNotifications = useCallback(async () => {
     try {
@@ -455,19 +496,19 @@ export default function HomePage() {
         return;
       }
       const role = (user.publicMetadata.role as string) || "client";
-      const jwt = await getToken(); // 👈 PRIDANÉ
+      const jwt = await getToken();
 
       const res = await fetch(`${backend}/register-fcm`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          Authorization: `Bearer ${jwt}`, // 👈 PRIDANÉ
+          Authorization: `Bearer ${jwt}`,
         },
         body: JSON.stringify({
           fcmToken: token,
           role,
           platform: "web",
-        }), // ❌ userId už neposielame
+        }),
       });
       if (res.ok) {
         setHasNotifications(true);
@@ -480,7 +521,7 @@ export default function HomePage() {
       console.error("FCM chyba:", err);
       alert("Nastala chyba pri nastavovaní notifikácií.");
     }
-  }, [backend, user, getToken]); // 👈 PRIDANÉ getToken
+  }, [backend, user, getToken]);
 
   return (
     <main className="min-h-screen bg-gradient-to-br from-stone-100 via-emerald-50 to-amber-50 text-stone-800">
