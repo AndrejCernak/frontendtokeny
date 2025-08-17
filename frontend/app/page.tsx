@@ -297,6 +297,13 @@ export default function HomePage() {
     });
 
     setInCall(true);
+    if (callTimerRef.current) clearTimeout(callTimerRef.current);
+callTimerRef.current = setTimeout(() => {
+  // ak sa doteraz nespustil hovor (server by poslal "call-started")
+  if (!pcRef.current || pcRef.current.connectionState === "new" || pcRef.current.connectionState === "connecting") {
+    hardResetPeerLocally(); // zruší PC/streamy/audio a vráti inCall=false
+  }
+}, 20000);
   }, [
     user,
     isFriday,
@@ -393,6 +400,17 @@ export default function HomePage() {
         if (msg.type === "end-call") {
           setIncomingCall(null);
           await stopCall(msg.from as string | undefined);
+        }
+
+         if (msg.type === "call-locked") {
+          // zhasni banner
+          setIncomingCall((prev) => {
+            if (prev && String(msg.callId) === prev.callId) return null;
+            return prev;
+          });
+          // 🔧 vyčisti aj prípadný pendingOffer
+          setPendingOffer(null);
+          // (nechávam callIdRef ako je; ak chceš, môžeš ho resetnúť len pre admina)
         }
 
         if (msg.type === "webrtc-offer") {
