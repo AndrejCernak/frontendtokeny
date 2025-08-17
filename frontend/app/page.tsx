@@ -17,7 +17,8 @@ import {
 } from "react";
 import { requestFcmToken } from "@/lib/firebase";
 import { connectWS, sendWS } from "@/lib/wsClient";
-import { createPeerConnection } from "@/lib/webrtc";
+import { attachMicToPc, createPeerConnection } from "@/lib/webrtc";
+
 
 type IncomingCall = { callId: string; from: string; callerName: string };
 
@@ -77,15 +78,29 @@ export default function HomePage() {
   }, [backend, user]);
 
   const startLocalStream = useCallback(async () => {
-    try {
-      localStreamRef.current = await navigator.mediaDevices.getUserMedia({
-        audio: true,
-      });
-    } catch {
-      console.error("❌ Mikrofón - getUserMedia failed");
-      alert("Nepodarilo sa získať prístup k mikrofónu.");
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({
+      audio: {
+        echoCancellation: true,
+        noiseSuppression: true,
+        autoGainControl: false,
+      },
+    });
+    // enable track just in case
+    const at = stream.getAudioTracks()[0];
+    if (at) at.enabled = true;
+
+    localStreamRef.current = stream;
+
+    // ak už máme rozbehnutý PC (napr. admin klikol Prijať, stream dobehol až teraz)
+    if (pcRef.current) {
+      attachMicToPc(pcRef.current, stream);
     }
-  }, []);
+  } catch (e) {
+    console.error("❌ Mikrofón - getUserMedia failed", e);
+    alert("Nepodarilo sa získať prístup k mikrofónu.");
+  }
+}, []);
 
   const toggleMute = useCallback(() => {
     const track = localStreamRef.current?.getAudioTracks?.()[0];
@@ -252,15 +267,19 @@ export default function HomePage() {
       if (!localStreamRef.current) await startLocalStream();
 
       const newPc = createPeerConnection(
-        localStreamRef.current!,
-        targetId,
-        attachRemoteStream,
-        { getCallId: () => callIdRef.current }
-      );
-      attachPCGuards(newPc);
-      setPc(newPc);
-      pcRef.current = newPc;
-      peerIdRef.current = targetId;
+      localStreamRef.current!,
+      targetId,
+      attachRemoteStream,
+      { getCallId: () => callIdRef.current }
+    );
+    attachPCGuards(newPc);
+    setPc(newPc);
+    pcRef.current = newPc;
+    peerIdRef.current = targetId;
+
+    // ✅ ešte raz explicitne pripoj mikrofón (ak by sa stream získal tesne predtým)
+    attachMicToPc(newPc, localStreamRef.current!);
+
 
       if (pendingOffer && pendingOffer.from === targetId) {
         await newPc.setRemoteDescription(
@@ -323,6 +342,10 @@ export default function HomePage() {
     pcRef.current = newPc;
     peerIdRef.current = targetId;
 
+    // ✅
+    attachMicToPc(newPc, localStreamRef.current!);
+
+
     const offer = await newPc.createOffer();
     await newPc.setLocalDescription(offer);
 
@@ -365,40 +388,42 @@ export default function HomePage() {
   ]);
 
   const sendNewOffer = useCallback(
-    async (targetId: string) => {
-      if (!localStreamRef.current) {
-        await startLocalStream();
-      }
+  async (targetId: string) => {
+    if (!localStreamRef.current) {
+      await startLocalStream();
+    }
 
-      let pcToUse = pcRef.current;
-      if (!pcToUse || ["closed", "failed"].includes(pcToUse.connectionState)) {
-        const newPc = createPeerConnection(
-          localStreamRef.current!,
-          targetId,
-          attachRemoteStream,
-          { getCallId: () => callIdRef.current }
-        );
-        attachPCGuards(newPc);
-        setPc(newPc);
-        pcRef.current = newPc;
-        peerIdRef.current = targetId;
-        pcToUse = newPc;
-      }
-
-      const offer = await pcToUse.createOffer({ iceRestart: true });
-      await pcToUse.setLocalDescription(offer);
-
-      sendWS({
-        type: "webrtc-offer",
+    let pcToUse = pcRef.current;
+    if (!pcToUse || ["closed", "failed"].includes(pcToUse.connectionState)) {
+      const newPc = createPeerConnection(
+        localStreamRef.current!,
         targetId,
-        offer,
-        callerId: user?.id,
-        callId: callIdRef.current,
-      });
-    },
-    [startLocalStream, attachRemoteStream, user, attachPCGuards]
-  );
+        attachRemoteStream,
+        { getCallId: () => callIdRef.current }
+      );
+      attachPCGuards(newPc);
+      setPc(newPc);
+      pcRef.current = newPc;
+      peerIdRef.current = targetId;
+      pcToUse = newPc;
+    }
 
+    // ✅ doplň toto:
+    attachMicToPc(pcToUse, localStreamRef.current!);
+
+    const offer = await pcToUse.createOffer({ iceRestart: true });
+    await pcToUse.setLocalDescription(offer);
+
+    sendWS({
+      type: "webrtc-offer",
+      targetId,
+      offer,
+      callerId: user?.id,
+      callId: callIdRef.current,
+    });
+  },
+  [startLocalStream, attachRemoteStream, user, attachPCGuards]
+);
   // ===== INIT (sync-user, fetch balance, connect WS, fallback)
   useEffect(() => {
     const init = async () => {
