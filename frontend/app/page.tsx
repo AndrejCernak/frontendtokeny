@@ -35,6 +35,7 @@ export default function HomePage() {
 
   // ——— Call state
   const [incomingCall, setIncomingCall] = useState<IncomingCall | null>(null);
+  const [pc, setPc] = useState<RTCPeerConnection | null>(null);
   const pcRef = useRef<RTCPeerConnection | null>(null);
   const [hasNotifications, setHasNotifications] = useState<boolean>(() => {
     if (typeof window === "undefined") return false;
@@ -133,6 +134,7 @@ export default function HomePage() {
       }
     } catch {}
     pcRef.current = null;
+    setPc(null);
 
     try {
       localStreamRef.current?.getTracks().forEach((t) => t.stop());
@@ -172,6 +174,7 @@ export default function HomePage() {
         );
         attachPCGuards(newPc);
         pcRef.current = newPc;
+        setPc(newPc);
         peerIdRef.current = targetId;
       }
       return pcRef.current!;
@@ -209,6 +212,7 @@ export default function HomePage() {
           try { pcRef.current.close(); } catch {}
         }
         pcRef.current = null;
+        setPc(null);
 
         // Zastav lokálne streamy
         try { localStreamRef.current?.getTracks().forEach((t) => t.stop()); } catch {}
@@ -241,17 +245,21 @@ export default function HomePage() {
   // ===== Accept / Call =====
   const handleAccept = useCallback(
   async (targetId: string) => {
-    hardResetPeerLocally();
+    hardResetPeerLocally(); // čistý stôl
+
     setIncomingCall(null);
 
+    // 1) Získaj mikrofón (užívateľ klikol -> user gesture OK aj v iOS/Safari)
     if (!localStreamRef.current) await startLocalStream();
 
+    // rýchla kontrola – ak nemáme audio track, upozorniť
     const hasMic = !!localStreamRef.current?.getAudioTracks?.()[0];
     if (!hasMic) {
       alert("Mikrofón nebol nájdený alebo je zablokovaný v prehliadači.");
       return;
     }
 
+    // 2) Vytvor PC, ktoré hneď pridá lokálny track a transceiver
     const newPc = createPeerConnection(
       localStreamRef.current!,
       targetId,
@@ -259,25 +267,34 @@ export default function HomePage() {
       { getCallId: () => callIdRef.current }
     );
     attachPCGuards(newPc);
+    setPc(newPc);
     pcRef.current = newPc;
     peerIdRef.current = targetId;
 
+    // 3) Ak máme pending offer od volajúceho → najprv setRemote, potom answer
     if (pendingOffer && pendingOffer.from === targetId) {
-      await newPc.setRemoteDescription(new RTCSessionDescription(pendingOffer.offer));
+      await newPc.setRemoteDescription(
+        new RTCSessionDescription(pendingOffer.offer)
+      );
       const answer = await newPc.createAnswer();
       await newPc.setLocalDescription(answer);
-      sendWS({ type: "webrtc-answer", targetId, answer, callId: callIdRef.current });
+      sendWS({
+        type: "webrtc-answer",
+        targetId,
+        answer,
+        callId: callIdRef.current,
+      });
       setPendingOffer(null);
       try { remoteAudioRef.current?.play?.(); } catch {}
     } else {
+      // inak si vyžiadaj fresh offer
       sendWS({ type: "request-offer", targetId, callId: callIdRef.current });
     }
 
     setInCall(true);
   },
-  [startLocalStream, pendingOffer, attachRemoteStream, hardResetPeerLocally, attachPCGuards] // ← sem patrí deps array
+  [startLocalStream, pendingOffer, attachRemoteStream, hardResetPeerLocally, attachPCGuards]
 );
-
 
 
   const handleCall = useCallback(async () => {
@@ -311,6 +328,7 @@ export default function HomePage() {
       { getCallId: () => callIdRef.current }
     );
     attachPCGuards(newPc);
+    setPc(newPc);
     pcRef.current = newPc;
     peerIdRef.current = targetId;
 
@@ -370,6 +388,7 @@ export default function HomePage() {
           { getCallId: () => callIdRef.current }
         );
         attachPCGuards(newPc);
+        setPc(newPc);
         pcRef.current = newPc;
         peerIdRef.current = targetId;
         pcToUse = newPc;
