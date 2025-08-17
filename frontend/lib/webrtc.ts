@@ -15,25 +15,20 @@ export const createPeerConnection = (
     iceServers: [{ urls: ["stun:stun.l.google.com:19302"] }],
   });
 
-  // --- 1) Vždy pripravíme AUDIO transceiver v režime SENDRECV
-  // Tým si garantujeme, že SDP bude chcieť prijímať aj posielať audio.
+  // ✅ garantuj SENDRECV smer pre audio a pripoj lokálny mikrofón pred SDP
   const audioTransceiver = pc.addTransceiver("audio", { direction: "sendrecv" });
 
-  // --- 2) Pripoj lokálny mikrofón ešte pred SDP
   const localAudioTrack = localStream.getAudioTracks?.()[0];
   if (localAudioTrack) {
     try {
-      // preferovane: napojíme track priamo na sender transceivera
       if (audioTransceiver.sender.replaceTrack) {
-        audioTransceiver.sender.replaceTrack(localAudioTrack);
+        void audioTransceiver.sender.replaceTrack(localAudioTrack);
       } else {
         pc.addTrack(localAudioTrack, localStream);
       }
-      // pre istotu nech je povolený
       localAudioTrack.enabled = true;
     } catch (e) {
       console.error("replace/add local audio track failed:", e);
-      // fallback – ak by replace zlyhal
       try {
         pc.addTrack(localAudioTrack, localStream);
       } catch {}
@@ -42,13 +37,10 @@ export const createPeerConnection = (
     console.warn("⚠️ No local audio track found when creating RTCPeerConnection");
   }
 
-  // (Voliteľne: ak by si niekedy chcel pridať ďalšie audio/videá, môžeš ich tiež addTrack-nuť.
-  // Ale pre audio-only je transceiver + 1 mikrofón track ideálne.)
+  // ✅ prefer-const (predtým to padalo na 'prefer-const')
+  const remote = new MediaStream();
 
-  // --- 3) Remote stream handling
-  let remote = new MediaStream();
   pc.ontrack = (event: RTCTrackEvent) => {
-    // vezmeme prvý stream; ak by nebol, poskladáme ho manuálne
     if (event.streams && event.streams[0]) {
       onRemoteStream(event.streams[0]);
     } else {
@@ -59,22 +51,29 @@ export const createPeerConnection = (
     }
   };
 
-  // --- 4) ICE kandidáti (s callId)
   pc.onicecandidate = (event: RTCPeerConnectionIceEvent) => {
-    if (event.candidate) {
-      const payload: WSMessage = {
-        type: "webrtc-candidate",
-        targetId,
-        candidate: event.candidate.toJSON ? event.candidate.toJSON() : (event.candidate as any),
-        callId: opts.getCallId ? opts.getCallId() : undefined,
-      };
-      sendWS(payload);
-    }
-  };
+    if (!event.candidate) return;
 
-  // (Voliteľné: logy na debug)
-  // pc.onconnectionstatechange = () => console.log("PC state:", pc.connectionState);
-  // pc.onsignalingstatechange = () => console.log("Signaling:", pc.signalingState);
+    // ✅ žiadne 'any' – vytvoríme korektný RTCIceCandidateInit bez usernameFragment (je optional)
+    const c = event.candidate;
+    const candidateInit: RTCIceCandidateInit =
+      typeof (c as any).toJSON === "function"
+        ? (c as unknown as { toJSON: () => RTCIceCandidateInit }).toJSON()
+        : {
+            candidate: c.candidate,
+            sdpMid: c.sdpMid ?? undefined,
+            sdpMLineIndex: c.sdpMLineIndex ?? undefined,
+            // usernameFragment je nepovinný – vynecháme ho, aby sme sa vyhli any
+          };
+
+    const payload: WSMessage = {
+      type: "webrtc-candidate",
+      targetId,
+      candidate: candidateInit,
+      callId: opts.getCallId ? opts.getCallId() : undefined,
+    };
+    sendWS(payload);
+  };
 
   return pc;
 };

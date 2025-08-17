@@ -35,7 +35,6 @@ export default function HomePage() {
 
   // ——— Call state
   const [incomingCall, setIncomingCall] = useState<IncomingCall | null>(null);
-  const [pc, setPc] = useState<RTCPeerConnection | null>(null);
   const pcRef = useRef<RTCPeerConnection | null>(null);
   const [hasNotifications, setHasNotifications] = useState<boolean>(() => {
     if (typeof window === "undefined") return false;
@@ -134,7 +133,6 @@ export default function HomePage() {
       }
     } catch {}
     pcRef.current = null;
-    setPc(null);
 
     try {
       localStreamRef.current?.getTracks().forEach((t) => t.stop());
@@ -174,7 +172,6 @@ export default function HomePage() {
         );
         attachPCGuards(newPc);
         pcRef.current = newPc;
-        setPc(newPc);
         peerIdRef.current = targetId;
       }
       return pcRef.current!;
@@ -212,7 +209,6 @@ export default function HomePage() {
           try { pcRef.current.close(); } catch {}
         }
         pcRef.current = null;
-        setPc(null);
 
         // Zastav lokálne streamy
         try { localStreamRef.current?.getTracks().forEach((t) => t.stop()); } catch {}
@@ -267,7 +263,6 @@ export default function HomePage() {
       { getCallId: () => callIdRef.current }
     );
     attachPCGuards(newPc);
-    setPc(newPc);
     pcRef.current = newPc;
     peerIdRef.current = targetId;
 
@@ -328,7 +323,6 @@ export default function HomePage() {
       { getCallId: () => callIdRef.current }
     );
     attachPCGuards(newPc);
-    setPc(newPc);
     pcRef.current = newPc;
     peerIdRef.current = targetId;
 
@@ -388,7 +382,6 @@ export default function HomePage() {
           { getCallId: () => callIdRef.current }
         );
         attachPCGuards(newPc);
-        setPc(newPc);
         pcRef.current = newPc;
         peerIdRef.current = targetId;
         pcToUse = newPc;
