@@ -132,11 +132,12 @@ export default function HomePage() {
     // 🔧 Reset remote audio – inak niekedy prehliadač blokne ďalšie autoPlay
     if (remoteAudioRef.current) {
       try {
-        (remoteAudioRef.current as any).srcObject = null;
+        remoteAudioRef.current.srcObject = null; // HTMLAudioElement dedí srcObject z HTMLMediaElement
         remoteAudioRef.current.pause();
         remoteAudioRef.current.currentTime = 0;
       } catch {}
     }
+
 
     // Vyčisti interný stav
     clearCallTimer();
