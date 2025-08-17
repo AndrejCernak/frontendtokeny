@@ -77,6 +77,43 @@ export default function HomePage() {
     return m;
   }, [backend, user]);
 
+
+  // úplne hore pri ostatných useCallback/helperoch v page.tsx
+const hardResetPeerLocally = useCallback(() => {
+  try {
+    if (pcRef.current) {
+      pcRef.current.onicecandidate = null;
+      pcRef.current.ontrack = null;
+      // voliteľne:
+      pcRef.current.onconnectionstatechange = null;
+      pcRef.current.close();
+    }
+  } catch {}
+  pcRef.current = null;
+  setPc(null);
+
+  try {
+    localStreamRef.current?.getTracks().forEach(t => t.stop());
+  } catch {}
+  localStreamRef.current = null;
+
+  if (remoteAudioRef.current) {
+    try {
+      remoteAudioRef.current.srcObject = null;
+      remoteAudioRef.current.pause();
+      remoteAudioRef.current.currentTime = 0;
+    } catch {}
+  }
+
+  setPendingOffer(null);
+  setIncomingCall(null);
+  setIsMuted(false);
+  setInCall(false);
+  peerIdRef.current = null;
+  callIdRef.current = null;
+}, []);
+
+
   const startLocalStream = useCallback(async () => {
     try {
       localStreamRef.current = await navigator.mediaDevices.getUserMedia({
@@ -156,6 +193,7 @@ export default function HomePage() {
   // ===== Accept / Call =====
   const handleAccept = useCallback(
     async (targetId: string) => {
+      hardResetPeerLocally();
       setIncomingCall(null);
       if (!localStreamRef.current) await startLocalStream();
 
@@ -197,6 +235,8 @@ export default function HomePage() {
 
   const handleCall = useCallback(async () => {
     if (!user) return;
+
+    hardResetPeerLocally();
 
     if (isFriday) {
       const m = await fetchFridayBalance();
