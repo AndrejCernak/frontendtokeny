@@ -57,6 +57,7 @@ export default function HomePage() {
   const callTimerRef = useRef<NodeJS.Timeout | null>(null);
   const peerIdRef = useRef<string | null>(null);
   const callIdRef = useRef<string | null>(null);
+  
 
   const [pendingOffer, setPendingOffer] = useState<{
     offer: RTCSessionDescriptionInit;
@@ -109,37 +110,47 @@ export default function HomePage() {
     }
   };
 
-  const stopCall = useCallback(
-    async (targetId?: string) => {
+  const stopCall = useCallback(async (targetId?: string) => {
+  try {
+    const id = targetId ?? peerIdRef.current ?? undefined;
+    if (id) sendWS({ type: "end-call", targetId: id, callId: callIdRef.current });
+
+    // Zavri PC a odstráň handlerov
+    if (pcRef.current) {
+      pcRef.current.onicecandidate = null;
+      pcRef.current.ontrack = null;
+      pcRef.current.getSenders().forEach(s => s.track && s.track.stop());
+      pcRef.current.close();
+    }
+    pcRef.current = null;
+    setPc(null);
+
+    // Zastav lokálne streamy
+    localStreamRef.current?.getTracks().forEach(t => t.stop());
+    localStreamRef.current = null;
+
+    // 🔧 Reset remote audio – inak niekedy prehliadač blokne ďalšie autoPlay
+    if (remoteAudioRef.current) {
       try {
-        const id = targetId ?? peerIdRef.current ?? undefined;
-        if (id) {
-          sendWS({ type: "end-call", targetId: id, callId: callIdRef.current });
-        }
+        (remoteAudioRef.current as any).srcObject = null;
+        remoteAudioRef.current.pause();
+        remoteAudioRef.current.currentTime = 0;
+      } catch {}
+    }
 
-        if (pcRef.current) {
-          pcRef.current.getSenders().forEach((s) => s.track && s.track.stop());
-          pcRef.current.close();
-        }
-        pcRef.current = null;
-        setPc(null);
+    // Vyčisti interný stav
+    clearCallTimer();
+    setPendingOffer(null);
+    setIncomingCall(null);
+    setIsMuted(false);
+    setInCall(false);
+  } finally {
+    peerIdRef.current = null;
+    callIdRef.current = null;
+    await fetchFridayBalance();
+  }
+}, [fetchFridayBalance]);
 
-        localStreamRef.current?.getTracks().forEach((t) => t.stop());
-        localStreamRef.current = null;
-
-        clearCallTimer();
-        setInCall(false);
-        setIsMuted(false);
-        setIncomingCall(null);
-        setPendingOffer(null);
-      } finally {
-        peerIdRef.current = null;
-        callIdRef.current = null;
-        await fetchFridayBalance();
-      }
-    },
-    [fetchFridayBalance]
-  );
 
   // ===== Accept / Call =====
   const handleAccept = useCallback(
@@ -150,7 +161,8 @@ export default function HomePage() {
       const newPc = createPeerConnection(
         localStreamRef.current!,
         targetId,
-        attachRemoteStream
+        attachRemoteStream,
+        { getCallId: () => callIdRef.current }   // <= pridané
       );
       setPc(newPc);
       pcRef.current = newPc;
@@ -203,7 +215,9 @@ export default function HomePage() {
     const newPc = createPeerConnection(
       localStreamRef.current!,
       targetId,
-      attachRemoteStream
+      attachRemoteStream,
+      { getCallId: () => callIdRef.current }   // <= pridané
+
     );
     setPc(newPc);
     pcRef.current = newPc;
@@ -246,7 +260,9 @@ export default function HomePage() {
         const newPc = createPeerConnection(
           localStreamRef.current!,
           targetId,
-          attachRemoteStream
+          attachRemoteStream,
+            { getCallId: () => callIdRef.current }   // <= pridané
+
         );
         setPc(newPc);
         peerIdRef.current = targetId;
@@ -348,30 +364,30 @@ export default function HomePage() {
 
 
         if (msg.type === "webrtc-answer") {
-          if (!localStreamRef.current) await startLocalStream();
+  if (!localStreamRef.current) await startLocalStream();
 
-          let pcLocal = pcRef.current;
-          if (!pcLocal) {
-            const newPc = createPeerConnection(
-              localStreamRef.current!,
-              msg.callerId as string,
-              attachRemoteStream
-            );
-            setPc(newPc);
-            pcRef.current = newPc;
-            peerIdRef.current = msg.callerId as string;
-            pcLocal = newPc;
-          }
+      let pcLocal = pcRef.current;
+      if (!pcLocal) {
+        const newPc = createPeerConnection(
+          localStreamRef.current!,
+          msg.callerId as string,
+          attachRemoteStream,
+          { getCallId: () => callIdRef.current }
+        );
+        setPc(newPc);
+        pcRef.current = newPc;
+        peerIdRef.current = msg.callerId as string;
+        pcLocal = newPc;
+      }
 
-          await pcLocal.setRemoteDescription(
-            new RTCSessionDescription(msg.answer as RTCSessionDescriptionInit)
-          );
-          await pcLocal.setRemoteDescription(
-            new RTCSessionDescription(msg.answer as RTCSessionDescriptionInit)
-          );
-          callIdRef.current = typeof msg.callId === "string" ? msg.callId : callIdRef.current;
-          try { remoteAudioRef.current?.play?.(); } catch {}
-        }
+      await pcLocal.setRemoteDescription(
+        new RTCSessionDescription(msg.answer as RTCSessionDescriptionInit)
+      );
+
+      callIdRef.current = typeof msg.callId === "string" ? msg.callId : callIdRef.current;
+      try { remoteAudioRef.current?.play?.(); } catch {}
+    }
+
 
         if (msg.type === "webrtc-candidate") {
           const pcLocal = pcRef.current;
