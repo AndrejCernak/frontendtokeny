@@ -4,6 +4,26 @@ export type WSMessage = {
   [key: string]: unknown;
 };
 
+// ——— jedinečný identifikátor pre KAŽDÝ TAB/ZARIADENIE ———
+function genId() {
+  if (typeof crypto !== "undefined" && "randomUUID" in crypto) {
+    // @ts-ignore
+    return crypto.randomUUID();
+  }
+  return Math.random().toString(36).slice(2) + Date.now().toString(36);
+}
+export const DEVICE_ID = (() => {
+  try {
+    const k = "ws-device-id";
+    const existing = typeof window !== "undefined" ? localStorage.getItem(k) : null;
+    // každý TAB musí mať vlastné ID → nepoužijeme localStorage zdieľane,
+    // lebo by spôsobil kolízie medzi tabmi; ponecháme per-tab ID:
+    return genId();
+  } catch {
+    return genId();
+  }
+})();
+
 let ws: WebSocket | null = null;
 let onMsg: ((m: WSMessage) => void) | null = null;
 let currentUserId: string | null = null;
@@ -20,12 +40,17 @@ const WS_URL = process.env.NEXT_PUBLIC_BACKEND_URL!
 // buffer správ kým nie sme OPEN
 const queue: WSMessage[] = [];
 
+function withMeta(data: WSMessage): WSMessage {
+  // Pripni deviceId ku každej správe (kritické pri multi-device)
+  return { deviceId: DEVICE_ID, ...data };
+}
+
 function flushQueue() {
   if (!ws || ws.readyState !== WebSocket.OPEN) return;
   while (queue.length) {
     const payload = queue.shift()!;
     try {
-      ws.send(JSON.stringify(payload));
+      ws.send(JSON.stringify(withMeta(payload)));
     } catch {
       // swallow
     }
@@ -34,7 +59,12 @@ function flushQueue() {
 
 function doRegister() {
   if (!ws || ws.readyState !== WebSocket.OPEN || !currentUserId) return;
-  const payload: WSMessage = { type: "register", userId: currentUserId, role: currentRole || undefined };
+  const payload: WSMessage = {
+    type: "register",
+    userId: currentUserId,
+    role: currentRole || undefined,
+    deviceId: DEVICE_ID, // <<< dôležité
+  };
   ws.send(JSON.stringify(payload));
 }
 
@@ -42,7 +72,6 @@ function setupSocket() {
   ws = new WebSocket(WS_URL);
 
   ws.onopen = () => {
-    // console.log("✅ WebSocket connected");
     backoff = 500;
     doRegister();
     flushQueue();
@@ -51,14 +80,18 @@ function setupSocket() {
   ws.onmessage = (event: MessageEvent<string>) => {
     try {
       const msg = JSON.parse(event.data) as WSMessage;
+
+      // Ak príde správa s targetDeviceId a nie je pre tento TAB, ignoruj ju.
+      const tDev = (msg as any).targetDeviceId as string | undefined;
+      if (tDev && tDev !== DEVICE_ID) return;
+
       if (onMsg) onMsg(msg);
-    } catch (err) {
-      // console.error("❌ WS parse error:", err);
+    } catch {
+      // parse error – ignoruj
     }
   };
 
   ws.onclose = () => {
-    // console.warn("⚠️ WebSocket disconnected");
     if (reconnectTimer) clearTimeout(reconnectTimer);
     reconnectTimer = setTimeout(() => {
       setupSocket();
@@ -71,7 +104,11 @@ function setupSocket() {
   };
 }
 
-export function connectWS(userId: string, role: string, onMessage?: (msg: WSMessage) => void) {
+export function connectWS(
+  userId: string,
+  role: string,
+  onMessage?: (msg: WSMessage) => void
+) {
   currentUserId = userId;
   currentRole = role;
   onMsg = onMessage || null;
@@ -84,20 +121,16 @@ export function connectWS(userId: string, role: string, onMessage?: (msg: WSMess
 }
 
 export function sendWS(data: WSMessage) {
+  const payload = withMeta(data);
   if (ws && ws.readyState === WebSocket.OPEN) {
-    ws.send(JSON.stringify(data));
+    ws.send(JSON.stringify(payload));
   } else if (ws && ws.readyState === WebSocket.CONNECTING) {
-    queue.push(data);
-    ws.addEventListener(
-      "open",
-      () => {
-        flushQueue();
-      },
-      { once: true }
-    );
+    queue.push(payload);
+    ws.addEventListener("open", () => {
+      flushQueue();
+    }, { once: true });
   } else {
-    // queue + prípadný bootstrap socketu
-    queue.push(data);
+    queue.push(payload);
     if (!ws || ws.readyState === WebSocket.CLOSED) setupSocket();
   }
 }
