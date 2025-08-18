@@ -273,9 +273,9 @@ export default function HomePage() {
     setIncomingCall(null);
 
     // 1) uisti sa, že máme lokálny mic stream
-    if (!localStreamRef.current) {
-      await startLocalStream(); // naplní localStreamRef.current
-    }
+   // 1) vždy načítaj mikrofón nanovo
+    await startLocalStream();
+
 
     // 2) vytvor/nahraď PC pre daný target
     const newPc = createPeerConnection(
