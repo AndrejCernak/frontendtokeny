@@ -16,8 +16,9 @@ import {
   useMemo,
 } from "react";
 import { requestFcmToken } from "@/lib/firebase";
-import { connectWS, sendWS } from "@/lib/wsClient";
+import { connectWS, sendWS, DEVICE_ID } from "@/lib/wsClient";
 import { attachMicToPc, createPeerConnection } from "@/lib/webrtc";
+
 
 
 type IncomingCall = { callId: string; from: string; callerName: string };
@@ -335,6 +336,7 @@ if (!at) {
         targetId,
         answer,
         callId: callIdRef.current,
+        deviceId: DEVICE_ID, // <<< dôležité
       });
 
       // 9) prehrávanie remote audia (ak je potrebné manuálne .play())
