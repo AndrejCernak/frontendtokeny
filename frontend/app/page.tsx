@@ -36,7 +36,7 @@ export default function HomePage() {
 
   // ——— Call state
   const [incomingCall, setIncomingCall] = useState<IncomingCall | null>(null);
-  const [pc, setPc] = useState<RTCPeerConnection | null>(null);
+  const [, setPc] = useState<RTCPeerConnection | null>(null);
   const pcRef = useRef<RTCPeerConnection | null>(null);
   const [hasNotifications, setHasNotifications] = useState<boolean>(() => {
     if (typeof window === "undefined") return false;
@@ -259,6 +259,11 @@ export default function HomePage() {
     [fetchFridayBalance]
   );
 
+  type TransceiverDirWritable = RTCRtpTransceiver & {
+  setDirection?: (dir: RTCRtpTransceiverDirection) => void;
+  direction?: RTCRtpTransceiverDirection; // Safari fallback
+};
+
   // ===== Accept / Call =====
   const handleAccept = useCallback(
   async (targetId: string) => {
@@ -295,22 +300,24 @@ export default function HomePage() {
       await newPc.setRemoteDescription(new RTCSessionDescription(po.offer));
 
       // 5) Vynúť sendrecv pre audio
-      let at = newPc.getTransceivers().find(
-        (t) =>
-          t.receiver?.track?.kind === "audio" ||
-          t.sender?.track?.kind === "audio"
-      );
+      // 5) Vynúť sendrecv pre audio
+let at = newPc.getTransceivers().find(
+  (t) =>
+    t.receiver?.track?.kind === "audio" ||
+    t.sender?.track?.kind === "audio"
+);
 
-      if (!at) {
-        at = newPc.addTransceiver("audio", { direction: "sendrecv" });
-      } else {
-        const anyAt = at as any;
-        if (typeof anyAt.setDirection === "function") {
-          anyAt.setDirection("sendrecv");
-        } else {
-          anyAt.direction = "sendrecv"; // fallback pre Safari
-        }
-      }
+if (!at) {
+  at = newPc.addTransceiver("audio", { direction: "sendrecv" });
+} else {
+  const tx = at as TransceiverDirWritable;
+  if (typeof tx.setDirection === "function") {
+    tx.setDirection("sendrecv");
+  } else if (typeof tx.direction !== "undefined") {
+    tx.direction = "sendrecv";
+  }
+}
+
 
 
       // 6) TERAZ pripoj/nahraď mikrofón
