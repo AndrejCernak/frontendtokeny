@@ -262,13 +262,16 @@ export default function HomePage() {
   // ===== Accept / Call =====
   const handleAccept = useCallback(
   async (targetId: string) => {
+    // 0) čistý stôl pred prijatím
     hardResetPeerLocally();
     setIncomingCall(null);
 
+    // 1) uisti sa, že máme lokálny mic stream
     if (!localStreamRef.current) {
-      await startLocalStream();
+      await startLocalStream(); // naplní localStreamRef.current
     }
 
+    // 2) vytvor/nahraď PC pre daný target
     const newPc = createPeerConnection(
       localStreamRef.current!,
       targetId,
@@ -280,6 +283,7 @@ export default function HomePage() {
     setPc(newPc);
     peerIdRef.current = targetId;
 
+    // 3) musí existovať pending offer od volajúceho
     const po = pendingOffer;
     if (!po?.offer) {
       console.error("Žiadna pending offer pri prijatí hovoru.");
@@ -287,43 +291,38 @@ export default function HomePage() {
     }
 
     try {
-      // 1) Najprv remote offer
+      // 4) najprv nastav remote offer
       await newPc.setRemoteDescription(new RTCSessionDescription(po.offer));
 
-      // 2) Vynúť sendrecv pre audio (kľúčové pri multi-device/Safari)
+      // 5) Vynúť sendrecv pre audio
       let at = newPc.getTransceivers().find(
         (t) =>
           t.receiver?.track?.kind === "audio" ||
           t.sender?.track?.kind === "audio"
       );
+
       if (!at) {
         at = newPc.addTransceiver("audio", { direction: "sendrecv" });
       } else {
-        try {
-          // niekde je .setDirection, inde priamy property
-          // @ts-ignore
-          at.setDirection ? at.setDirection("sendrecv") : (at.direction = "sendrecv");
-        } catch {}
+        const anyAt = at as any;
+        if (typeof anyAt.setDirection === "function") {
+          anyAt.setDirection("sendrecv");
+        } else {
+          anyAt.direction = "sendrecv"; // fallback pre Safari
+        }
       }
 
-      // 3) TERAZ pripoj mikrofón (alebo nahradenie na existujúcom senderi)
+
+      // 6) TERAZ pripoj/nahraď mikrofón
       if (localStreamRef.current) {
         attachMicToPc(newPc, localStreamRef.current);
       }
 
-      // (voliteľné logy na debug – pozri, či ide audio m-line ako sendrecv)
-      // console.log("ANSWER BEFORE setLocal:", await newPc.createAnswer());
-
-      // 4) Answer
+      // 7) vytvor a nastav answer
       const answer = await newPc.createAnswer();
       await newPc.setLocalDescription(answer);
 
-      // Rýchla kontrola SDP, či má audio send:
-      // console.log("Local SDP (audio lines):",
-      //   answer.sdp?.split("\n").filter(l => l.startsWith("m=audio") || l.startsWith("a=send"))
-      // );
-
-      // 5) Pošli answer volajúcemu
+      // 8) pošli answer späť volajúcemu cez WS
       sendWS({
         type: "webrtc-answer",
         targetId,
@@ -331,14 +330,19 @@ export default function HomePage() {
         callId: callIdRef.current,
       });
 
-      // 6) Spusti prehrávač remote audia
+      // 9) prehrávanie remote audia (ak je potrebné manuálne .play())
       if (remoteAudioRef.current) {
-        try { await remoteAudioRef.current.play(); } catch {}
+        try {
+          await remoteAudioRef.current.play();
+        } catch {
+          /* niektoré prehliadače vyžadujú user gesture */
+        }
       }
 
       setPendingOffer(null);
       setInCall(true);
 
+      // 10) bezpečnostný timeout – ak sa nič nedeje, uprac
       if (callTimerRef.current) clearTimeout(callTimerRef.current);
       callTimerRef.current = setTimeout(() => {
         if (
@@ -365,6 +369,7 @@ export default function HomePage() {
     setInCall,
   ]
 );
+
 
 
 
