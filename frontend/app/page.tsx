@@ -565,13 +565,16 @@ pendingCandidatesRef.current = [];
         }
 
         if (msg.type === "call-locked") {
-          // zhasni banner len ak sedí callId (viac zariadení admina)
-          setIncomingCall((prev) => {
-            if (prev && String(msg.callId) === prev.callId) return null;
-            return prev;
-          });
-          setPendingOffer(null);
-        }
+  // Zhasni banner a zahoď všetko k tomuto prichádzajúcemu hovoru
+  setIncomingCall((prev) => {
+    // ak sedí callId, určite zhasni
+    if (prev && String(msg.callId || "") === prev.callId) return null;
+    // ak nesedí (alebo chýba), ale máme práve zobrazený prichádzajúci hovor,
+    // tiež zhasni – hovor už niekto prijal na inom zariadení
+    return null;
+  });
+  setPendingOffer(null);
+}
 
         if (msg.type === "webrtc-offer") {
   const incomingCallId = typeof msg.callId === "string" ? msg.callId : null;
