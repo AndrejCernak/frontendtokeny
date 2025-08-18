@@ -58,12 +58,11 @@ export function createPeerConnection(
   opts: CreatePcOptions = {}
 ): RTCPeerConnection {
   const pc = new RTCPeerConnection({
-    iceServers: [
-      { urls: "stun:stun.l.google.com:19302" },
-      { urls: "stun:global.stun.twilio.com:3478?transport=udp" },
-    ],
-    // iceTransportPolicy: "all", // ponechaj default
-  });
+  iceServers: [
+    { urls: "stun:stun.l.google.com:19302" } // free Google STUN
+  ]
+});
+
 
   // Ak máme lokálny stream, pripoj mikrofón (nezakladá to duplicitné sendery, replaceTrack to kryje)
   if (localStream) {
