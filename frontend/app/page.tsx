@@ -268,16 +268,18 @@ export default function HomePage() {
   // ===== Accept / Call =====
   const handleAccept = useCallback(
   async (targetId: string) => {
-    // 0) čistý stôl pred prijatím
+    // 0) tvrdý lokálny reset pred prijatím (vyčistí staré PC/streamy)
     hardResetPeerLocally();
     setIncomingCall(null);
 
-    // 1) uisti sa, že máme lokálny mic stream
-   // 1) vždy načítaj mikrofón nanovo
+    // 1) vždy načítaj mikrofón nanovo (nie len keď chýba)
     await startLocalStream();
+    console.log(
+      "Admin local tracks:",
+      localStreamRef.current?.getTracks()?.map((t) => `${t.kind}:${t.readyState}`)
+    );
 
-
-    // 2) vytvor/nahraď PC pre daný target
+    // 2) vytvor nové PC pre daný target
     const newPc = createPeerConnection(
       localStreamRef.current!,
       targetId,
@@ -297,31 +299,27 @@ export default function HomePage() {
     }
 
     try {
-      // 4) najprv nastav remote offer
+      // 4) nastav remote offer
       await newPc.setRemoteDescription(new RTCSessionDescription(po.offer));
 
-      // 5) Vynúť sendrecv pre audio
-      // 5) Vynúť sendrecv pre audio
-let at = newPc.getTransceivers().find(
-  (t) =>
-    t.receiver?.track?.kind === "audio" ||
-    t.sender?.track?.kind === "audio"
-);
+      // 5) vynúť audio transceiver na 'sendrecv' (Safari fallback podporený)
+      let at = newPc.getTransceivers().find(
+        (t) =>
+          t.receiver?.track?.kind === "audio" ||
+          t.sender?.track?.kind === "audio"
+      );
+      if (!at) {
+        at = newPc.addTransceiver("audio", { direction: "sendrecv" });
+      } else {
+        const tx = at as unknown as {
+          setDirection?: (dir: RTCRtpTransceiverDirection) => void;
+          direction?: RTCRtpTransceiverDirection;
+        };
+        if (typeof tx.setDirection === "function") tx.setDirection("sendrecv");
+        else if (typeof tx.direction !== "undefined") tx.direction = "sendrecv";
+      }
 
-if (!at) {
-  at = newPc.addTransceiver("audio", { direction: "sendrecv" });
-} else {
-  const tx = at as TransceiverDirWritable;
-  if (typeof tx.setDirection === "function") {
-    tx.setDirection("sendrecv");
-  } else if (typeof tx.direction !== "undefined") {
-    tx.direction = "sendrecv";
-  }
-}
-
-
-
-      // 6) TERAZ pripoj/nahraď mikrofón
+      // 6) pripoj/nahraď mikrofón do PC
       if (localStreamRef.current) {
         attachMicToPc(newPc, localStreamRef.current);
       }
@@ -330,22 +328,20 @@ if (!at) {
       const answer = await newPc.createAnswer();
       await newPc.setLocalDescription(answer);
 
-      // 8) pošli answer späť volajúcemu cez WS
+      // 8) pošli answer späť volajúcemu cez WS (s deviceId pre multi-device routing)
       sendWS({
         type: "webrtc-answer",
         targetId,
         answer,
         callId: callIdRef.current,
-        deviceId: DEVICE_ID, // <<< dôležité
+        deviceId: DEVICE_ID,
       });
 
-      // 9) prehrávanie remote audia (ak je potrebné manuálne .play())
+      // 9) skús spustiť prehrávanie remote audia (pre mobilné prehliadače)
       if (remoteAudioRef.current) {
         try {
           await remoteAudioRef.current.play();
-        } catch {
-          /* niektoré prehliadače vyžadujú user gesture */
-        }
+        } catch {}
       }
 
       setPendingOffer(null);
@@ -359,6 +355,7 @@ if (!at) {
           pcRef.current.connectionState === "new" ||
           pcRef.current.connectionState === "connecting"
         ) {
+          console.warn("No connection after 20s, hard resetting peer locally.");
           hardResetPeerLocally();
         }
       }, 20000);
@@ -378,7 +375,6 @@ if (!at) {
     setInCall,
   ]
 );
-
 
 
 
@@ -435,6 +431,8 @@ if (!at) {
       offer,
       callerId: user?.id,
       callId: callIdRef.current,
+      deviceId: DEVICE_ID, // ← pridaj toto
+
     });
 
     setInCall(true);

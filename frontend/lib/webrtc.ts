@@ -1,83 +1,110 @@
-// lib/webrtc.ts
-import { sendWS } from "./wsClient";
+// /lib/webrtc.ts
+// Spoľahlivé pripojenie mikrofónu + správne posielanie ICE kandidátov s deviceId & callId.
 
-type CreatePCOpts = {
-  getCallId?: () => string | null;
+import { sendWS, DEVICE_ID } from "@/lib/wsClient";
+
+type CreatePcOptions = {
+  getCallId?: () => string | null | undefined;
 };
 
 /**
- * Vytvorí RTCPeerConnection, nastaví handlery a posielanie ICE kandidátov.
- * POZOR: zámerne NEPRIDÁVA žiadny lokálny track – to robíme cielene cez `attachMicToPc`
- * v správnom poradí (napr. po setRemoteDescription pri prijatí hovoru).
+ * Pripojí/nahradí mikrofónový audio track do RTCPeerConnection.
+ * - ak už audio sender existuje: replaceTrack(track)
+ * - inak: addTrack(track, stream)
  */
-export const createPeerConnection = (
-  _localStream: MediaStream, // vedome nevyužité – nechávame podpis kompatibilný
-  targetId: string,
-  onRemoteStream: (stream: MediaStream) => void,
-  opts: CreatePCOpts = {}
-): RTCPeerConnection => {
-  const pc = new RTCPeerConnection({
-    iceServers: [{ urls: ["stun:stun.l.google.com:19302"] }],
-  });
-
-  // Posielanie ICE kandidátov peerovi
-  pc.onicecandidate = (e) => {
-    if (!e.candidate) return;
-    sendWS({
-      type: "webrtc-candidate",
-      targetId,
-      candidate: e.candidate,
-      callId: opts.getCallId?.() ?? null,
-    });
-  };
-
-  // Remote stream prichádza cez ontrack
-  pc.ontrack = (ev) => {
-    // Väčšina prehliadačov dá stream v ev.streams[0]
-    if (ev.streams && ev.streams[0]) {
-      onRemoteStream(ev.streams[0]);
-      return;
-    }
-    // Fallback (niektoré implementácie neposielajú streams pole)
-    const single = new MediaStream([ev.track]);
-    onRemoteStream(single);
-  };
-
-  // Voliteľná údržba: ak spadne spojenie, nech si to rieši volajúci kód
-  // (v app/page.tsx máš attachPCGuards / hardResetPeerLocally)
-
-  return pc;
-};
-
-/**
- * Bezpečne pripojí (alebo nahradí) mikrofón do existujúceho PC.
- * - Ak existuje audio sender, použije replaceTrack.
- * - Ak neexistuje, pridá jediný audio track (a tým vytvorí jednu audio m-line).
- */
-export const attachMicToPc = (pc: RTCPeerConnection, localStream: MediaStream): void => {
-  const track = localStream.getAudioTracks()[0];
-  if (!track) return;
-
-  // Skús nájsť už existujúci audio sender
-  const existingAudioSender =
-    pc.getSenders().find((s) => s.track?.kind === "audio") ??
-    pc.getSenders().find((s) => !s.track); // “prázdny” sender, ak by existoval
-
-  if (existingAudioSender) {
-    if (existingAudioSender.track !== track) {
-      try {
-        existingAudioSender.replaceTrack(track);
-      } catch {
-        // v krajnom prípade sa nepodarí replaceTrack – potom ešte skúsime addTrack nižšie
-      }
-    }
+export function attachMicToPc(pc: RTCPeerConnection, stream: MediaStream) {
+  if (!pc || !stream) return;
+  const track = stream.getAudioTracks()[0];
+  if (!track) {
+    console.warn("attachMicToPc: stream nemá audio track.");
     return;
   }
 
-  // Ak audio sender nie je, pridaj track (vznikne len 1 m=audio, keďže PC je bez audio sendera)
+  // pre istotu zapni track
   try {
-    pc.addTrack(track, localStream);
-  } catch {
-    // ignoruj – ak by prehliadač padol na addTrack, nech to nezhodí app
+    track.enabled = true;
+  } catch {}
+
+  const existingSender = pc
+    .getSenders()
+    .find((s) => s.track?.kind === "audio");
+
+  if (existingSender) {
+    // nahradenie existujúceho tracku
+    existingSender.replaceTrack(track).catch((e) => {
+      console.error("replaceTrack error:", e);
+    });
+  } else {
+    // prvé pripojenie
+    try {
+      pc.addTrack(track, stream);
+    } catch (e) {
+      console.error("addTrack error:", e);
+    }
   }
-};
+}
+
+/**
+ * Vytvorí a nakonfiguruje RTCPeerConnection.
+ * - nastaví STUNy (možeš nahradiť za vlastné)
+ * - pripojí mikrofón, ak je dostupný
+ * - nastaví ontrack → odovzdá remote stream do callbacku
+ * - posiela ICE kandidátov s deviceId a callId (dôležité pre multi-device)
+ */
+export function createPeerConnection(
+  localStream: MediaStream | null,
+  targetId: string,
+  onRemoteStream: (stream: MediaStream) => void,
+  opts: CreatePcOptions = {}
+): RTCPeerConnection {
+  const pc = new RTCPeerConnection({
+    iceServers: [
+      { urls: "stun:stun.l.google.com:19302" },
+      { urls: "stun:global.stun.twilio.com:3478?transport=udp" },
+    ],
+    // iceTransportPolicy: "all", // ponechaj default
+  });
+
+  // Ak máme lokálny stream, pripoj mikrofón (nezakladá to duplicitné sendery, replaceTrack to kryje)
+  if (localStream) {
+    try {
+      attachMicToPc(pc, localStream);
+    } catch (e) {
+      console.error("attachMicToPc(initial) error:", e);
+    }
+  }
+
+  // Remote stream handling
+  pc.ontrack = (ev) => {
+    // uprednostni stream z ev.streams, ak je k dispozícii
+    const remoteStream = ev.streams?.[0] ?? new MediaStream([ev.track]);
+    onRemoteStream(remoteStream);
+  };
+
+  // ICE candidates → WS (s deviceId + callId kvôli multi-device routingu)
+  pc.onicecandidate = (e) => {
+    if (!e.candidate) return;
+    try {
+      const callId = opts.getCallId?.() ?? null;
+      sendWS({
+        type: "webrtc-candidate",
+        targetId,
+        candidate: e.candidate,
+        callId,           // musí byť rovnaký ako pri offer/answer
+        deviceId: DEVICE_ID,
+      });
+    } catch (err) {
+      console.error("onicecandidate -> sendWS error:", err);
+    }
+  };
+
+  // Voliteľná diagnostika
+  pc.oniceconnectionstatechange = () => {
+    const s = pc.iceConnectionState;
+    if (s === "failed") {
+      console.warn("ICE failed; you may want to restart ICE.");
+    }
+  };
+
+  return pc;
+}
