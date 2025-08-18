@@ -86,21 +86,23 @@ export default function HomePage() {
         autoGainControl: false,
       },
     });
-    // enable track just in case
+
     const at = stream.getAudioTracks()[0];
     if (at) at.enabled = true;
 
     localStreamRef.current = stream;
 
-    // ak už máme rozbehnutý PC (napr. admin klikol Prijať, stream dobehol až teraz)
+    // ak už PC existuje (napr. admin stlačil „Prijať“ a stream dobehol až teraz),
+    // pripoj/nahraď mic track do existujúceho PC
     if (pcRef.current) {
-      attachMicToPc(pcRef.current, stream);
+      attachMicToPc(pcRef.current, stream); // ← POUŽI IMPORTOVANÚ FUNKCIU
     }
   } catch (e) {
     console.error("❌ Mikrofón - getUserMedia failed", e);
     alert("Nepodarilo sa získať prístup k mikrofónu.");
   }
 }, []);
+
 
   const toggleMute = useCallback(() => {
     const track = localStreamRef.current?.getAudioTracks?.()[0];
@@ -259,53 +261,96 @@ export default function HomePage() {
 
   // ===== Accept / Call =====
   const handleAccept = useCallback(
-    async (targetId: string) => {
-      // pred prijatím si urob čistý stôl
-      hardResetPeerLocally();
+  async (targetId: string) => {
+    // 0) čistý stôl pred prijatím
+    hardResetPeerLocally();
+    setIncomingCall(null);
 
-      setIncomingCall(null);
-      if (!localStreamRef.current) await startLocalStream();
+    // 1) uisti sa, že máme lokálny mic stream
+    if (!localStreamRef.current) {
+      await startLocalStream(); // naplní localStreamRef.current
+    }
 
-      const newPc = createPeerConnection(
+    // 2) vytvor/nahraď PC pre daný target
+    const newPc = createPeerConnection(
       localStreamRef.current!,
       targetId,
       attachRemoteStream,
       { getCallId: () => callIdRef.current }
     );
     attachPCGuards(newPc);
-    setPc(newPc);
     pcRef.current = newPc;
+    setPc(newPc);
     peerIdRef.current = targetId;
 
-    // ✅ ešte raz explicitne pripoj mikrofón (ak by sa stream získal tesne predtým)
-    attachMicToPc(newPc, localStreamRef.current!);
+    // 3) musí existovať pending offer od volajúceho
+    const po = pendingOffer;
+    if (!po?.offer) {
+      console.error("Žiadna pending offer pri prijatí hovoru.");
+      return;
+    }
 
+    try {
+      // 4) najprv nastav remote offer
+      await newPc.setRemoteDescription(new RTCSessionDescription(po.offer));
 
-      if (pendingOffer && pendingOffer.from === targetId) {
-        await newPc.setRemoteDescription(
-          new RTCSessionDescription(pendingOffer.offer)
-        );
-        const answer = await newPc.createAnswer();
-        await newPc.setLocalDescription(answer);
-        sendWS({
-          type: "webrtc-answer",
-          targetId,
-          answer,
-          callId: callIdRef.current,
-        });
-        setPendingOffer(null);
-        try {
-          remoteAudioRef.current?.play?.();
-        } catch {}
-      } else {
-        // ak admin otvorí PWA až po push-ke, vyžiada si offer pre konkrétny callId
-        sendWS({ type: "request-offer", targetId, callId: callIdRef.current });
+      // 5) TERAZ pripoj/nahraď mikrofón (kľúčové pre iOS/Safari)
+      if (localStreamRef.current) {
+        attachMicToPc(newPc, localStreamRef.current);
       }
 
+      // 6) vytvor a nastav answer
+      const answer = await newPc.createAnswer();
+      await newPc.setLocalDescription(answer);
+
+      // 7) pošli answer späť volajúcemu cez WS
+      sendWS({
+        type: "webrtc-answer",
+        targetId,
+        answer,
+        callId: callIdRef.current,
+      });
+
+      // 8) prehrávanie remote audia (ak je potrebné manuálne .play())
+      if (remoteAudioRef.current) {
+        try {
+          await remoteAudioRef.current.play();
+        } catch (e) {
+          // niektoré prehliadače vyžadujú user gesture; ignoruj
+        }
+      }
+
+      setPendingOffer(null);
       setInCall(true);
-    },
-    [startLocalStream, pendingOffer, attachRemoteStream, hardResetPeerLocally, attachPCGuards]
-  );
+
+      // 9) bezpečnostný timeout – ak sa nič nedeje, uprac
+      if (callTimerRef.current) clearTimeout(callTimerRef.current);
+      callTimerRef.current = setTimeout(() => {
+        if (
+          !pcRef.current ||
+          pcRef.current.connectionState === "new" ||
+          pcRef.current.connectionState === "connecting"
+        ) {
+          hardResetPeerLocally();
+        }
+      }, 20000);
+    } catch (err) {
+      console.error("handleAccept error:", err);
+      hardResetPeerLocally();
+    }
+  },
+  [
+    pendingOffer,
+    startLocalStream,
+    attachRemoteStream,
+    attachPCGuards,
+    sendWS,
+    setIncomingCall,
+    setPendingOffer,
+    setInCall,
+  ]
+);
+
 
   const handleCall = useCallback(async () => {
     if (!user) return;
