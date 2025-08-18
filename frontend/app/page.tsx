@@ -59,6 +59,8 @@ export default function HomePage() {
   const callTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const peerIdRef = useRef<string | null>(null);
   const callIdRef = useRef<string | null>(null);
+  const pendingCandidatesRef = useRef<RTCIceCandidateInit[]>([]);
+
 
   const [pendingOffer, setPendingOffer] = useState<{
     offer: RTCSessionDescriptionInit;
@@ -174,6 +176,10 @@ export default function HomePage() {
     peerIdRef.current = null;
     callIdRef.current = null;
     clearCallTimer();
+
+    pendingCandidatesRef.current = [];   // ← TU sa to čistí pri resete
+
+    
   }, []);
 
   // helper: ak PC neexistuje alebo je closed/failed, vytvor nový
@@ -301,6 +307,14 @@ export default function HomePage() {
     try {
       // 4) nastav remote offer
       await newPc.setRemoteDescription(new RTCSessionDescription(po.offer));
+      // flush pending candidates, ktoré prišli pred answerom
+for (const c of pendingCandidatesRef.current) {
+  try { await newPc.addIceCandidate(new RTCIceCandidate(c)); } catch (e) {
+    console.error("flush addIceCandidate (admin):", e);
+  }
+}
+pendingCandidatesRef.current = [];
+
 
       // 5) vynúť audio transceiver na 'sendrecv' (Safari fallback podporený)
       let at = newPc.getTransceivers().find(
@@ -579,6 +593,14 @@ export default function HomePage() {
           await pcLocal.setRemoteDescription(
             new RTCSessionDescription(msg.answer as RTCSessionDescriptionInit)
           );
+          // flush pending candidates
+for (const c of pendingCandidatesRef.current) {
+  try { await pcLocal.addIceCandidate(new RTCIceCandidate(c)); } catch (e) {
+    console.error("flush addIceCandidate:", e);
+  }
+}
+pendingCandidatesRef.current = [];
+
           callIdRef.current =
             typeof msg.callId === "string" ? msg.callId : callIdRef.current;
           try {
@@ -587,13 +609,28 @@ export default function HomePage() {
         }
 
         if (msg.type === "webrtc-candidate") {
-          const pcLocal = pcRef.current;
-          if (pcLocal) {
-            await pcLocal.addIceCandidate(
-              new RTCIceCandidate(msg.candidate as RTCIceCandidateInit)
-            );
-          }
-        }
+  const cand = msg.candidate as RTCIceCandidateInit;
+  const pcLocal = pcRef.current;
+
+  if (!pcLocal) {
+    // ešte nemáme PC → ulož
+    pendingCandidatesRef.current.push(cand);
+    return;
+  }
+
+  // ak remoteDescription ešte nie je nastavený, odlož
+  if (!pcLocal.remoteDescription) {
+    pendingCandidatesRef.current.push(cand);
+    return;
+  }
+
+  try {
+    await pcLocal.addIceCandidate(new RTCIceCandidate(cand));
+  } catch (e) {
+    console.error("addIceCandidate error:", e);
+  }
+}
+
 
         if (msg.type === "request-offer") {
           callIdRef.current =
