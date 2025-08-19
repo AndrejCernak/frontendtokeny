@@ -61,6 +61,9 @@ export default function HomePage() {
   const callIdRef = useRef<string | null>(null);
   const pendingCandidatesRef = useRef<RTCIceCandidateInit[]>([]);
 
+  const [peerAccepted, setPeerAccepted] = useState(false);
+  const [remoteConnected, setRemoteConnected] = useState(false);
+
 
   const [pendingOffer, setPendingOffer] = useState<{
     offer: RTCSessionDescriptionInit;
@@ -208,16 +211,29 @@ export default function HomePage() {
 
   // malý guard na PC stav (ak spadne, uprac, nech ďalšie volanie ide hneď)
   const attachPCGuards = useCallback(
-    (peer: RTCPeerConnection) => {
-      peer.onconnectionstatechange = () => {
-        const s = peer.connectionState;
-        if (s === "failed" || s === "closed") {
-          hardResetPeerLocally();
-        }
-      };
-    },
-    [hardResetPeerLocally]
-  );
+  (peer: RTCPeerConnection) => {
+    peer.onconnectionstatechange = () => {
+      const s = peer.connectionState;
+      if (s === "connected") {
+        setPeerAccepted(true);
+        setRemoteConnected(true);
+      }
+      if (s === "disconnected" || s === "failed" || s === "closed") {
+        setRemoteConnected(false);
+        hardResetPeerLocally();
+      }
+    };
+
+    // Keď dorazí prvý remote track, určite sme „napojení“
+    peer.ontrack = (ev) => {
+      attachRemoteStream(ev.streams[0]);
+      setPeerAccepted(true);
+      setRemoteConnected(true);
+    };
+  },
+  [attachRemoteStream, hardResetPeerLocally]
+);
+
 
   const stopCall = useCallback(
     async (targetId?: string, notify = true) => {
@@ -276,6 +292,8 @@ export default function HomePage() {
   async (targetId: string) => {
     // 0) tvrdý lokálny reset pred prijatím (vyčistí staré PC/streamy)
     hardResetPeerLocally();
+    setPeerAccepted(false);
+    setRemoteConnected(false);
     setIncomingCall(null);
 
     // 1) vždy načítaj mikrofón nanovo (nie len keď chýba)
@@ -397,6 +415,9 @@ pendingCandidatesRef.current = [];
 
     // pred novým hovorom vždy urob čistý lokálny reset
     hardResetPeerLocally();
+    setPeerAccepted(false);
+    setRemoteConnected(false);
+
     callIdRef.current = null;
 
     await nudgeAudio();
@@ -555,9 +576,11 @@ pendingCandidatesRef.current = [];
         }
 
         if (msg.type === "call-started") {
-          setIncomingCall(null);
-          setInCall(true);
-        }
+        setIncomingCall(null);
+        setInCall(true);
+        setPeerAccepted(true); // ← admin prijal
+      }
+
 
         if (msg.type === "end-call") {
           setIncomingCall(null);
@@ -836,6 +859,18 @@ pendingCandidatesRef.current = [];
             <div className="flex items-center justify-between gap-4 flex-wrap">
               <div className="flex-1">
                 <h2 className="text-lg font-semibold mb-1">Stav hovoru</h2>
+                <p className="text-stone-600 text-sm">
+                  {incomingCall
+                    ? `Prichádzajúci hovor od: ${incomingCall.callerName}`
+                    : inCall && !peerAccepted
+                    ? "Volám… Čakám na prijatie druhej strany."
+                    : inCall && peerAccepted && !remoteConnected
+                    ? "Prijaté, pripájam…"
+                    : inCall && remoteConnected
+                    ? "Prebieha hovor – pripojené."
+                    : "Pripravený na hovor"}
+                </p>
+
                 <p className="text-stone-600 text-sm">
                   {incomingCall
                     ? `Prichádzajúci hovor od: ${incomingCall.callerName}`
