@@ -879,22 +879,22 @@ pendingCandidatesRef.current = [];
                 </div>
               )}
 
-              <div className="flex items-center gap-2">
-                <button
-                  className="px-4 py-2 rounded-xl bg-emerald-600 text-white shadow hover:bg-emerald-700 transition"
-                  onClick={toggleMute}
-                  disabled={!inCall}
-                >
-                  {isMuted ? "Unmute" : "Mute"}
-                </button>
-                <button
-                  className="px-4 py-2 rounded-xl bg-stone-700 text-white shadow hover:bg-stone-800 transition disabled:opacity-50"
-                  onClick={() => stopCall()}
-                  disabled={!inCall}
-                >
-                  Ukončiť hovor
-                </button>
-              </div>
+              {inCall && (
+                <div className="flex items-center gap-2">
+                  <button
+                    className="px-4 py-2 rounded-xl bg-emerald-600 text-white shadow hover:bg-emerald-700 transition"
+                    onClick={toggleMute}
+                  >
+                    {isMuted ? "Unmute" : "Mute"}
+                  </button>
+                  <button
+                    className="px-4 py-2 rounded-xl bg-stone-700 text-white shadow hover:bg-stone-800 transition"
+                    onClick={() => stopCall()}
+                  >
+                    Ukončiť hovor
+                  </button>
+                </div>
+              )}
             </div>
 
             {/* 🔈 remote audio */}
