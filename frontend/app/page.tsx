@@ -146,44 +146,50 @@ export default function HomePage() {
   }, []);
 
   // 🔧 tvrdý lokálny reset peeru/streamov/audia bez WS správ
-  const hardResetPeerLocally = useCallback(() => {
-    try {
-      if (pcRef.current) {
-        pcRef.current.onicecandidate = null;
-        pcRef.current.ontrack = null;
-        pcRef.current.onconnectionstatechange = null;
-        pcRef.current.getSenders().forEach((s) => s.track && s.track.stop());
-        pcRef.current.close();
-      }
-    } catch {}
-    pcRef.current = null;
-    setPc(null);
-
-    try {
-      localStreamRef.current?.getTracks().forEach((t) => t.stop());
-    } catch {}
-    localStreamRef.current = null;
-
-    if (remoteAudioRef.current) {
-      try {
-        remoteAudioRef.current.srcObject = null;
-        remoteAudioRef.current.pause();
-        remoteAudioRef.current.currentTime = 0;
-      } catch {}
+  // 🔧 tvrdý lokálny reset peeru/streamov/audia bez WS správ
+// 🔧 tvrdý lokálny reset peeru/streamov/audia bez WS správ
+const hardResetPeerLocally = useCallback((opts?: { preserveSignaling?: boolean }) => {
+  try {
+    if (pcRef.current) {
+      pcRef.current.onicecandidate = null;
+      pcRef.current.ontrack = null;
+      pcRef.current.onconnectionstatechange = null;
+      pcRef.current.getSenders().forEach((s) => s.track && s.track.stop());
+      pcRef.current.close();
     }
+  } catch {}
+  pcRef.current = null;
+  setPc(null);
 
+  try {
+    localStreamRef.current?.getTracks().forEach((t) => t.stop());
+  } catch {}
+  localStreamRef.current = null;
+
+  if (remoteAudioRef.current) {
+    try {
+      remoteAudioRef.current.srcObject = null;
+      remoteAudioRef.current.pause();
+      remoteAudioRef.current.currentTime = 0;
+    } catch {}
+  }
+
+  // UI/reset stavov
+  setIncomingCall(null);
+  setIsMuted(false);
+  setInCall(false);
+  peerIdRef.current = null;
+  callIdRef.current = null;
+  clearCallTimer();
+
+  // ⚠️ Ak prijímame hovor, nechceme zmazať signalizačné dáta (offer + ICE buffer)
+  if (!opts?.preserveSignaling) {
+    pendingCandidatesRef.current = [];
     setPendingOffer(null);
-    setIncomingCall(null);
-    setIsMuted(false);
-    setInCall(false);
-    peerIdRef.current = null;
-    callIdRef.current = null;
-    clearCallTimer();
+  }
+}, []);
 
-    pendingCandidatesRef.current = [];   // ← TU sa to čistí pri resete
 
-    
-  }, []);
 
   // helper: ak PC neexistuje alebo je closed/failed, vytvor nový
   const ensureFreshPC = useCallback(
@@ -291,7 +297,8 @@ export default function HomePage() {
   const handleAccept = useCallback(
   async (targetId: string) => {
     // 0) tvrdý lokálny reset pred prijatím (vyčistí staré PC/streamy)
-    hardResetPeerLocally();
+// 0) reset bez zmazania signalizačných bufferov (offer + ICE)
+    hardResetPeerLocally({ preserveSignaling: true });
     setPeerAccepted(false);
     setRemoteConnected(false);
     setIncomingCall(null);
@@ -467,7 +474,6 @@ pendingCandidatesRef.current = [];
       callerId: user?.id,
       callId: callIdRef.current,
       deviceId: DEVICE_ID, // ← pridaj toto
-
     });
 
     setInCall(true);
@@ -528,6 +534,7 @@ pendingCandidatesRef.current = [];
       offer,
       callerId: user?.id,
       callId: callIdRef.current,
+      deviceId: DEVICE_ID,
     });
   },
   [startLocalStream, attachRemoteStream, user, attachPCGuards]
@@ -871,13 +878,6 @@ pendingCandidatesRef.current = [];
                     : "Pripravený na hovor"}
                 </p>
 
-                <p className="text-stone-600 text-sm">
-                  {incomingCall
-                    ? `Prichádzajúci hovor od: ${incomingCall.callerName}`
-                    : inCall
-                    ? "Prebieha hovor"
-                    : "Pripravený na hovor"}
-                </p>
                 <p className="text-xs text-stone-500 mt-1">
                   {isFriday
                     ? "Piatok: volanie len s piatkovými tokenmi."

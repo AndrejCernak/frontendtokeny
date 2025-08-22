@@ -37,5 +37,7 @@ export function sendWS(payload: Msg) {
     console.warn("WS not ready, dropping message", payload);
     return;
   }
-  WS.send(JSON.stringify(payload));
+  // doplň deviceId do každej správy
+  WS.send(JSON.stringify({ deviceId: DEVICE_ID, ...payload }));
 }
+
