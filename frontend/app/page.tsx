@@ -92,7 +92,17 @@ export default function HomePage() {
     pc.onconnectionstatechange = () => console.log(`[${tag}] connectionState=`, pc.connectionState);
     pc.onicecandidateerror = (e: any) => console.warn(`[${tag}] onicecandidateerror`, e);
     pc.onnegotiationneeded = () => console.log(`[${tag}] onnegotiationneeded`);
-    pc.ontrack = (ev) => console.log(`[${tag}] ontrack`, ev.streams?.[0]?.id, ev.track?.kind);
+pc.ontrack = (ev) => {
+  console.log(
+    "[TRACK] remote kind=", ev.track?.kind,
+    "muted=", ev.track?.muted,
+    "streams=", ev.streams?.[0]?.id
+  );
+  ev.track.onunmute = () => console.log("[TRACK] remote onunmute");
+  ev.track.onmute = () => console.log("[TRACK] remote onmute");
+  attachRemoteStream(ev.streams[0]);
+  forcePlayRemoteAudio();
+};
   }
 
   const sendWSWithLog = (payload: any) => {
@@ -124,7 +134,13 @@ export default function HomePage() {
       });
 
       const at = stream.getAudioTracks()[0];
-      if (at) at.enabled = true;
+      if (at) {
+        at.enabled = true;
+        at.onmute = () => console.log("[MIC] track muted");
+        at.onunmute = () => console.log("[MIC] track unmuted");
+        at.onended = () => console.log("[MIC] track ended");
+      }
+
 
       localStreamRef.current = stream;
 
@@ -150,8 +166,45 @@ export default function HomePage() {
     if (remoteAudioRef.current) {
       remoteAudioRef.current.srcObject = stream;
       remoteAudioRef.current.play().catch(() => {});
+      forcePlayRemoteAudio();
+
     }
   }, []);
+
+  // --- AUDIO: vynútené prehratie a event logy
+function forcePlayRemoteAudio() {
+  const a = remoteAudioRef.current;
+  if (!a) return;
+  a.muted = false;
+  a.volume = 1.0;
+  (a as any).playsInline = true; // iOS
+  a.autoplay = true;
+
+  a.onplay = () => console.log("[AUDIO] onplay");
+  a.onpause = () => console.log("[AUDIO] onpause");
+  a.oncanplay = () => console.log("[AUDIO] oncanplay");
+  a.onerror = (e) => console.log("[AUDIO] onerror", e);
+
+  a.play()
+    .then(() => console.log("[AUDIO] play() resolved; readyState=", a.readyState, "paused=", a.paused))
+    .catch(err => console.warn("[AUDIO] play() failed:", err?.name, err?.message));
+}
+
+// --- STATS: sleduj bajty dnu/von (na odhalenie, či tečie audio)
+let statsTimer: ReturnType<typeof setInterval> | null = null;
+
+async function logAudioStats(pc: RTCPeerConnection, tag: string) {
+  try {
+    const stats = await pc.getStats();
+    let inBytes = 0, outBytes = 0, jitter = 0;
+    stats.forEach((r: any) => {
+      if (r.type === "inbound-rtp" && r.kind === "audio") { inBytes = r.bytesReceived || 0; jitter = r.jitter || 0; }
+      if (r.type === "outbound-rtp" && r.kind === "audio") { outBytes = r.bytesSent || 0; }
+    });
+    console.log(`[STATS ${tag}] inBytes=${inBytes} outBytes=${outBytes} jitter=${jitter}`);
+  } catch {}
+}
+
 
   const clearCallTimer = () => {
     if (callTimerRef.current) {
@@ -212,6 +265,11 @@ export default function HomePage() {
       pendingCandidatesRef.current = [];
       setPendingOffer(null);
     }
+  if (statsTimer) {
+  clearInterval(statsTimer);
+  statsTimer = null;
+}
+
   }, []);
 
   // helper: ak PC neexistuje alebo je closed/failed, vytvor nový
@@ -304,8 +362,14 @@ export default function HomePage() {
         callIdRef.current = null;
         await fetchFridayBalance();
       }
+    if (statsTimer) {
+  clearInterval(statsTimer);
+  statsTimer = null;
+}
+
     },
     [fetchFridayBalance]
+    
   );
 
   type TransceiverDirWritable = RTCRtpTransceiver & {
@@ -407,6 +471,11 @@ export default function HomePage() {
 
         setPendingOffer(null);
         setInCall(true);
+        if (statsTimer) clearInterval(statsTimer);
+        statsTimer = setInterval(() => {
+          if (pcRef.current) logAudioStats(pcRef.current, "ADMIN");
+        }, 2000);
+
 
         // bezpečnostný timeout – len pri skutočnom faili
         if (callTimerRef.current) clearTimeout(callTimerRef.current);
@@ -502,6 +571,11 @@ export default function HomePage() {
     });
 
     setInCall(true);
+    if (statsTimer) clearInterval(statsTimer);
+      statsTimer = setInterval(() => {
+        if (pcRef.current) logAudioStats(pcRef.current, "CLIENT");
+      }, 2000);
+
 
     // bezpečnostný timeout – len pri skutočnom faili
     if (callTimerRef.current) clearTimeout(callTimerRef.current);
