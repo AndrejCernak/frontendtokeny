@@ -19,8 +19,6 @@ import { requestFcmToken } from "@/lib/firebase";
 import { connectWS, sendWS, DEVICE_ID } from "@/lib/wsClient";
 import { attachMicToPc, createPeerConnection } from "@/lib/webrtc";
 
-
-
 type IncomingCall = { callId: string; from: string; callerName: string };
 
 function isFridayInBratislava(d = new Date()) {
@@ -64,7 +62,6 @@ export default function HomePage() {
   const [peerAccepted, setPeerAccepted] = useState(false);
   const [remoteConnected, setRemoteConnected] = useState(false);
 
-
   const [pendingOffer, setPendingOffer] = useState<{
     offer: RTCSessionDescriptionInit;
     from: string;
@@ -73,6 +70,39 @@ export default function HomePage() {
   // ===== Backend helpers =====
   const backend = process.env.NEXT_PUBLIC_BACKEND_URL!;
   const adminId = process.env.NEXT_PUBLIC_ADMIN_ID as string;
+
+  // ---------- Diagnostics helpers ----------
+  function attachDeepRtcLogs(pc: RTCPeerConnection, tag: string) {
+    pc.onicegatheringstatechange = () => console.log(`[${tag}] iceGatheringState=`, pc.iceGatheringState);
+    pc.oniceconnectionstatechange = async () => {
+      const s = pc.iceConnectionState;
+      console.log(`[${tag}] iceConnectionState=`, s);
+      if (s === "disconnected") {
+        console.warn(`[${tag}] ICE disconnected → request-offer`);
+        if (peerIdRef.current) {
+          sendWSWithLog({ type: "request-offer", targetId: peerIdRef.current, callId: callIdRef.current });
+        }
+      }
+      if (s === "failed") {
+        console.warn(`[${tag}] ICE failed → iceRestart offer`);
+        if (peerIdRef.current) await sendNewOffer(peerIdRef.current);
+      }
+    };
+    pc.onsignalingstatechange = () => console.log(`[${tag}] signalingState=`, pc.signalingState);
+    pc.onconnectionstatechange = () => console.log(`[${tag}] connectionState=`, pc.connectionState);
+    pc.onicecandidateerror = (e: any) => console.warn(`[${tag}] onicecandidateerror`, e);
+    pc.onnegotiationneeded = () => console.log(`[${tag}] onnegotiationneeded`);
+    pc.ontrack = (ev) => console.log(`[${tag}] ontrack`, ev.streams?.[0]?.id, ev.track?.kind);
+  }
+
+  const sendWSWithLog = (payload: any) => {
+    console.log("[WS->] sending", payload?.type, {
+      targetId: payload?.targetId,
+      hasCallId: !!payload?.callId,
+      deviceId: payload?.deviceId,
+    });
+    sendWS(payload);
+  };
 
   const fetchFridayBalance = useCallback(async () => {
     if (!user) return 0;
@@ -84,31 +114,29 @@ export default function HomePage() {
   }, [backend, user]);
 
   const startLocalStream = useCallback(async () => {
-  try {
-    const stream = await navigator.mediaDevices.getUserMedia({
-      audio: {
-        echoCancellation: true,
-        noiseSuppression: true,
-        autoGainControl: false,
-      },
-    });
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: false,
+        },
+      });
 
-    const at = stream.getAudioTracks()[0];
-    if (at) at.enabled = true;
+      const at = stream.getAudioTracks()[0];
+      if (at) at.enabled = true;
 
-    localStreamRef.current = stream;
+      localStreamRef.current = stream;
 
-    // ak už PC existuje (napr. admin stlačil „Prijať“ a stream dobehol až teraz),
-    // pripoj/nahraď mic track do existujúceho PC
-    if (pcRef.current) {
-      attachMicToPc(pcRef.current, stream); // ← POUŽI IMPORTOVANÚ FUNKCIU
+      // ak už PC existuje, pripoj/nahraď mic track do existujúceho PC
+      if (pcRef.current) {
+        attachMicToPc(pcRef.current, stream);
+      }
+    } catch (e) {
+      console.error("❌ Mikrofón - getUserMedia failed", e);
+      alert("Nepodarilo sa získať prístup k mikrofónu.");
     }
-  } catch (e) {
-    console.error("❌ Mikrofón - getUserMedia failed", e);
-    alert("Nepodarilo sa získať prístup k mikrofónu.");
-  }
-}, []);
-
+  }, []);
 
   const toggleMute = useCallback(() => {
     const track = localStreamRef.current?.getAudioTracks?.()[0];
@@ -127,7 +155,7 @@ export default function HomePage() {
 
   const clearCallTimer = () => {
     if (callTimerRef.current) {
-      clearTimeout(callTimerRef.current); // ✅ správny cleanup pre setTimeout
+      clearTimeout(callTimerRef.current);
       callTimerRef.current = null;
     }
   };
@@ -146,50 +174,45 @@ export default function HomePage() {
   }, []);
 
   // 🔧 tvrdý lokálny reset peeru/streamov/audia bez WS správ
-  // 🔧 tvrdý lokálny reset peeru/streamov/audia bez WS správ
-// 🔧 tvrdý lokálny reset peeru/streamov/audia bez WS správ
-const hardResetPeerLocally = useCallback((opts?: { preserveSignaling?: boolean }) => {
-  try {
-    if (pcRef.current) {
-      pcRef.current.onicecandidate = null;
-      pcRef.current.ontrack = null;
-      pcRef.current.onconnectionstatechange = null;
-      pcRef.current.getSenders().forEach((s) => s.track && s.track.stop());
-      pcRef.current.close();
-    }
-  } catch {}
-  pcRef.current = null;
-  setPc(null);
-
-  try {
-    localStreamRef.current?.getTracks().forEach((t) => t.stop());
-  } catch {}
-  localStreamRef.current = null;
-
-  if (remoteAudioRef.current) {
+  const hardResetPeerLocally = useCallback((opts?: { preserveSignaling?: boolean }) => {
     try {
-      remoteAudioRef.current.srcObject = null;
-      remoteAudioRef.current.pause();
-      remoteAudioRef.current.currentTime = 0;
+      if (pcRef.current) {
+        pcRef.current.onicecandidate = null;
+        pcRef.current.ontrack = null;
+        pcRef.current.onconnectionstatechange = null;
+        pcRef.current.getSenders().forEach((s) => s.track && s.track.stop());
+        pcRef.current.close();
+      }
     } catch {}
-  }
+    pcRef.current = null;
+    setPc(null);
 
-  // UI/reset stavov
-  setIncomingCall(null);
-  setIsMuted(false);
-  setInCall(false);
-  peerIdRef.current = null;
-  callIdRef.current = null;
-  clearCallTimer();
+    try {
+      localStreamRef.current?.getTracks().forEach((t) => t.stop());
+    } catch {}
+    localStreamRef.current = null;
 
-  // ⚠️ Ak prijímame hovor, nechceme zmazať signalizačné dáta (offer + ICE buffer)
-  if (!opts?.preserveSignaling) {
-    pendingCandidatesRef.current = [];
-    setPendingOffer(null);
-  }
-}, []);
+    if (remoteAudioRef.current) {
+      try {
+        remoteAudioRef.current.srcObject = null;
+        remoteAudioRef.current.pause();
+        remoteAudioRef.current.currentTime = 0;
+      } catch {}
+    }
 
+    // UI/reset stavov
+    setIncomingCall(null);
+    setIsMuted(false);
+    setInCall(false);
+    peerIdRef.current = null;
+    callIdRef.current = null;
+    clearCallTimer();
 
+    if (!opts?.preserveSignaling) {
+      pendingCandidatesRef.current = [];
+      setPendingOffer(null);
+    }
+  }, []);
 
   // helper: ak PC neexistuje alebo je closed/failed, vytvor nový
   const ensureFreshPC = useCallback(
@@ -206,50 +229,50 @@ const hardResetPeerLocally = useCallback((opts?: { preserveSignaling?: boolean }
           { getCallId: () => callIdRef.current }
         );
         attachPCGuards(newPc);
+        attachDeepRtcLogs(newPc, role === "admin" ? "ADMIN" : "CLIENT");
         pcRef.current = newPc;
         setPc(newPc);
         peerIdRef.current = targetId;
+        (window as any).debugPeer = newPc;
       }
       return pcRef.current!;
     },
-    [attachRemoteStream]
+    [attachRemoteStream, role]
   );
 
   // malý guard na PC stav (ak spadne, uprac, nech ďalšie volanie ide hneď)
   const attachPCGuards = useCallback(
-  (peer: RTCPeerConnection) => {
-    peer.onconnectionstatechange = () => {
-      const s = peer.connectionState;
-      if (s === "connected") {
+    (peer: RTCPeerConnection) => {
+      peer.onconnectionstatechange = () => {
+        const s = peer.connectionState;
+        if (s === "connected") {
+          setPeerAccepted(true);
+          setRemoteConnected(true);
+        }
+        if (s === "disconnected" || s === "failed" || s === "closed") {
+          setRemoteConnected(false);
+          hardResetPeerLocally();
+        }
+      };
+
+      // Keď dorazí prvý remote track, určite sme „napojení“
+      peer.ontrack = (ev) => {
+        attachRemoteStream(ev.streams[0]);
         setPeerAccepted(true);
         setRemoteConnected(true);
-      }
-      if (s === "disconnected" || s === "failed" || s === "closed") {
-        setRemoteConnected(false);
-        hardResetPeerLocally();
-      }
-    };
-
-    // Keď dorazí prvý remote track, určite sme „napojení“
-    peer.ontrack = (ev) => {
-      attachRemoteStream(ev.streams[0]);
-      setPeerAccepted(true);
-      setRemoteConnected(true);
-    };
-  },
-  [attachRemoteStream, hardResetPeerLocally]
-);
-
+      };
+    },
+    [attachRemoteStream, hardResetPeerLocally]
+  );
 
   const stopCall = useCallback(
     async (targetId?: string, notify = true) => {
       try {
         const id = targetId ?? peerIdRef.current ?? undefined;
         if (id && notify) {
-          sendWS({ type: "end-call", targetId: id, callId: callIdRef.current });
+          sendWSWithLog({ type: "end-call", targetId: id, callId: callIdRef.current });
         }
 
-        // Zavri PC a odstráň handlerov
         if (pcRef.current) {
           pcRef.current.onicecandidate = null;
           pcRef.current.ontrack = null;
@@ -260,11 +283,9 @@ const hardResetPeerLocally = useCallback((opts?: { preserveSignaling?: boolean }
         pcRef.current = null;
         setPc(null);
 
-        // Zastav lokálne streamy
         try { localStreamRef.current?.getTracks().forEach((t) => t.stop()); } catch {}
         localStreamRef.current = null;
 
-        // Reset remote audio
         if (remoteAudioRef.current) {
           try {
             remoteAudioRef.current.srcObject = null;
@@ -273,7 +294,6 @@ const hardResetPeerLocally = useCallback((opts?: { preserveSignaling?: boolean }
           } catch {}
         }
 
-        // Vyčisti interný stav
         clearCallTimer();
         setPendingOffer(null);
         setIncomingCall(null);
@@ -289,138 +309,142 @@ const hardResetPeerLocally = useCallback((opts?: { preserveSignaling?: boolean }
   );
 
   type TransceiverDirWritable = RTCRtpTransceiver & {
-  setDirection?: (dir: RTCRtpTransceiverDirection) => void;
-  direction?: RTCRtpTransceiverDirection; // Safari fallback
-};
+    setDirection?: (dir: RTCRtpTransceiverDirection) => void;
+    direction?: RTCRtpTransceiverDirection;
+  };
 
   // ===== Accept / Call =====
   const handleAccept = useCallback(
-  async (targetId: string) => {
-    // 0) tvrdý lokálny reset pred prijatím (vyčistí staré PC/streamy)
-// 0) reset bez zmazania signalizačných bufferov (offer + ICE)
-    hardResetPeerLocally({ preserveSignaling: true });
-    setPeerAccepted(false);
-    setRemoteConnected(false);
-    setIncomingCall(null);
+    async (targetId: string) => {
+      // reset bez zmazania signalizačných bufferov (offer + ICE)
+      hardResetPeerLocally({ preserveSignaling: true });
+      setPeerAccepted(false);
+      setRemoteConnected(false);
+      setIncomingCall(null);
 
-    // 1) vždy načítaj mikrofón nanovo (nie len keď chýba)
-    await startLocalStream();
-    console.log(
-      "Admin local tracks:",
-      localStreamRef.current?.getTracks()?.map((t) => `${t.kind}:${t.readyState}`)
-    );
-
-    // 2) vytvor nové PC pre daný target
-    const newPc = createPeerConnection(
-      localStreamRef.current!,
-      targetId,
-      attachRemoteStream,
-      { getCallId: () => callIdRef.current }
-    );
-    attachPCGuards(newPc);
-    pcRef.current = newPc;
-    setPc(newPc);
-    peerIdRef.current = targetId;
-
-    // 3) musí existovať pending offer od volajúceho
-    const po = pendingOffer;
-    if (!po?.offer) {
-      console.error("Žiadna pending offer pri prijatí hovoru.");
-      return;
-    }
-
-    try {
-      // 4) nastav remote offer
-      await newPc.setRemoteDescription(new RTCSessionDescription(po.offer));
-      // flush pending candidates, ktoré prišli pred answerom
-for (const c of pendingCandidatesRef.current) {
-  try { await newPc.addIceCandidate(new RTCIceCandidate(c)); } catch (e) {
-    console.error("flush addIceCandidate (admin):", e);
-  }
-}
-pendingCandidatesRef.current = [];
-
-
-      // 5) vynúť audio transceiver na 'sendrecv' (Safari fallback podporený)
-      let at = newPc.getTransceivers().find(
-        (t) =>
-          t.receiver?.track?.kind === "audio" ||
-          t.sender?.track?.kind === "audio"
+      // vždy načítaj mikrofón nanovo
+      await startLocalStream();
+      console.log(
+        "Admin local tracks:",
+        localStreamRef.current?.getTracks()?.map((t) => `${t.kind}:${t.readyState}`)
       );
-      if (!at) {
-        at = newPc.addTransceiver("audio", { direction: "sendrecv" });
-      } else {
-        const tx = at as unknown as {
-          setDirection?: (dir: RTCRtpTransceiverDirection) => void;
-          direction?: RTCRtpTransceiverDirection;
-        };
-        if (typeof tx.setDirection === "function") tx.setDirection("sendrecv");
-        else if (typeof tx.direction !== "undefined") tx.direction = "sendrecv";
-      }
 
-      // 6) pripoj/nahraď mikrofón do PC
-      if (localStreamRef.current) {
-        attachMicToPc(newPc, localStreamRef.current);
-      }
-
-      // 7) vytvor a nastav answer
-      const answer = await newPc.createAnswer();
-      await newPc.setLocalDescription(answer);
-
-      // 8) pošli answer späť volajúcemu cez WS (s deviceId pre multi-device routing)
-      sendWS({
-        type: "webrtc-answer",
+      // vytvor nové PC
+      const newPc = createPeerConnection(
+        localStreamRef.current!,
         targetId,
-        answer,
-        callId: callIdRef.current,
-        deviceId: DEVICE_ID,
-      });
+        attachRemoteStream,
+        { getCallId: () => callIdRef.current }
+      );
+      attachPCGuards(newPc);
+      attachDeepRtcLogs(newPc, "ADMIN");
+      pcRef.current = newPc;
+      setPc(newPc);
+      peerIdRef.current = targetId;
+      (window as any).debugPeer = newPc;
 
-      // 9) skús spustiť prehrávanie remote audia (pre mobilné prehliadače)
-      if (remoteAudioRef.current) {
-        try {
-          await remoteAudioRef.current.play();
-        } catch {}
+      // musí existovať pending offer
+      const po = pendingOffer;
+      if (!po?.offer) {
+        console.error("Žiadna pending offer pri prijatí hovoru.");
+        return;
       }
 
-      setPendingOffer(null);
-      setInCall(true);
+      try {
+        // nastav remote offer
+        await newPc.setRemoteDescription(new RTCSessionDescription(po.offer));
 
-      // 10) bezpečnostný timeout – ak sa nič nedeje, uprac
-      if (callTimerRef.current) clearTimeout(callTimerRef.current);
-      callTimerRef.current = setTimeout(() => {
-        if (
-          !pcRef.current ||
-          pcRef.current.connectionState === "new" ||
-          pcRef.current.connectionState === "connecting"
-        ) {
-          console.warn("No connection after 20s, hard resetting peer locally.");
-          hardResetPeerLocally();
+        // flush pending candidates (prišli pred answerom)
+        if (pendingCandidatesRef.current.length) {
+          console.log("Flushing buffered ICE (admin):", pendingCandidatesRef.current.length);
+          for (const c of pendingCandidatesRef.current) {
+            try { await newPc.addIceCandidate(new RTCIceCandidate(c)); } catch (e) {
+              console.error("flush addIceCandidate (admin):", e);
+            }
+          }
+          pendingCandidatesRef.current = [];
         }
-      }, 20000);
-    } catch (err) {
-      console.error("handleAccept error:", err);
-      hardResetPeerLocally();
-    }
-  },
-  [
-    pendingOffer,
-    startLocalStream,
-    attachRemoteStream,
-    attachPCGuards,
-    sendWS,
-    setIncomingCall,
-    setPendingOffer,
-    setInCall,
-  ]
-);
 
+        // vynúť audio transceiver na 'sendrecv'
+        let at = newPc.getTransceivers().find(
+          (t) =>
+            t.receiver?.track?.kind === "audio" ||
+            t.sender?.track?.kind === "audio"
+        ) as TransceiverDirWritable | undefined;
+        if (!at) {
+          at = newPc.addTransceiver("audio", { direction: "sendrecv" }) as TransceiverDirWritable;
+        } else {
+          if (typeof at.setDirection === "function") at.setDirection("sendrecv");
+          else if (typeof at.direction !== "undefined") at.direction = "sendrecv";
+        }
 
+        // pripoj/nahraď mikrofón do PC
+        if (localStreamRef.current) {
+          attachMicToPc(newPc, localStreamRef.current);
+          console.log("Admin senders:",
+            newPc.getSenders().map(s => s.track && `${s.track.kind}:${s.track.readyState}`));
+        }
+
+        // vytvor a nastav answer
+        const answer = await newPc.createAnswer();
+        await newPc.setLocalDescription(answer);
+
+        // pošli answer späť volajúcemu
+        sendWSWithLog({
+          type: "webrtc-answer",
+          targetId,
+          answer,
+          callId: callIdRef.current,
+          deviceId: DEVICE_ID,
+        });
+
+        // skús spustiť prehrávanie remote audia (mobilné prehliadače)
+        if (remoteAudioRef.current) {
+          try {
+            await remoteAudioRef.current.play();
+          } catch {}
+        }
+
+        setPendingOffer(null);
+        setInCall(true);
+
+        // bezpečnostný timeout – len pri skutočnom faili
+        if (callTimerRef.current) clearTimeout(callTimerRef.current);
+        callTimerRef.current = setTimeout(() => {
+          const states = {
+            ice: pcRef.current?.iceConnectionState,
+            conn: pcRef.current?.connectionState,
+          };
+          console.warn("Safety timeout hit (60s). States:", states);
+          if (
+            pcRef.current?.connectionState === "failed" ||
+            pcRef.current?.iceConnectionState === "failed"
+          ) {
+            hardResetPeerLocally();
+          }
+        }, 60000);
+      } catch (err) {
+        console.error("handleAccept error:", err);
+        hardResetPeerLocally();
+      }
+    },
+    [
+      pendingOffer,
+      startLocalStream,
+      attachRemoteStream,
+      attachPCGuards,
+      sendWSWithLog,
+      setIncomingCall,
+      setPendingOffer,
+      setInCall,
+      hardResetPeerLocally,
+    ]
+  );
 
   const handleCall = useCallback(async () => {
     if (!user) return;
 
-    // pred novým hovorom vždy urob čistý lokálny reset
+    // čistý lokálny reset pred novým hovorom
     hardResetPeerLocally();
     setPeerAccepted(false);
     setRemoteConnected(false);
@@ -451,44 +475,49 @@ pendingCandidatesRef.current = [];
       { getCallId: () => callIdRef.current }
     );
     attachPCGuards(newPc);
+    attachDeepRtcLogs(newPc, "CLIENT");
     setPc(newPc);
     pcRef.current = newPc;
     peerIdRef.current = targetId;
+    (window as any).debugPeer = newPc;
 
-    // ✅
+    // pripoj mic
     attachMicToPc(newPc, localStreamRef.current!);
-
 
     const offer = await newPc.createOffer();
     await newPc.setLocalDescription(offer);
 
-    sendWS({
+    sendWSWithLog({
       type: "call-request",
       targetId,
       callerName: user?.fullName || "Neznámy",
     });
-    sendWS({
+    sendWSWithLog({
       type: "webrtc-offer",
       targetId,
       offer,
       callerId: user?.id,
       callId: callIdRef.current,
-      deviceId: DEVICE_ID, // ← pridaj toto
+      deviceId: DEVICE_ID,
     });
 
     setInCall(true);
 
-    // bezpečnostný timeout – ak sa call nespustí, uprac a nechaj usera skúsiť znova
+    // bezpečnostný timeout – len pri skutočnom faili
     if (callTimerRef.current) clearTimeout(callTimerRef.current);
     callTimerRef.current = setTimeout(() => {
+      const states = {
+        ice: pcRef.current?.iceConnectionState,
+        conn: pcRef.current?.connectionState,
+      };
+      console.warn("Safety timeout hit (60s). States:", states);
       if (
-        !pcRef.current ||
-        pcRef.current.connectionState === "new" ||
-        pcRef.current.connectionState === "connecting"
+        pcRef.current?.connectionState === "failed" ||
+        pcRef.current?.iceConnectionState === "failed"
       ) {
-        hardResetPeerLocally(); // zruší PC/streamy/audio a vráti inCall=false
+        hardResetPeerLocally();
       }
-    }, 20000);
+    }, 60000);
   }, [
     user,
     isFriday,
@@ -502,43 +531,45 @@ pendingCandidatesRef.current = [];
   ]);
 
   const sendNewOffer = useCallback(
-  async (targetId: string) => {
-    if (!localStreamRef.current) {
-      await startLocalStream();
-    }
+    async (targetId: string) => {
+      if (!localStreamRef.current) {
+        await startLocalStream();
+      }
 
-    let pcToUse = pcRef.current;
-    if (!pcToUse || ["closed", "failed"].includes(pcToUse.connectionState)) {
-      const newPc = createPeerConnection(
-        localStreamRef.current!,
+      let pcToUse = pcRef.current;
+      if (!pcToUse || ["closed", "failed"].includes(pcToUse.connectionState)) {
+        const newPc = createPeerConnection(
+          localStreamRef.current!,
+          targetId,
+          attachRemoteStream,
+          { getCallId: () => callIdRef.current }
+        );
+        attachPCGuards(newPc);
+        attachDeepRtcLogs(newPc, role === "admin" ? "ADMIN" : "CLIENT");
+        setPc(newPc);
+        pcRef.current = newPc;
+        peerIdRef.current = targetId;
+        pcToUse = newPc;
+        (window as any).debugPeer = newPc;
+      }
+
+      attachMicToPc(pcToUse, localStreamRef.current!);
+
+      const offer = await pcToUse.createOffer({ iceRestart: true });
+      await pcToUse.setLocalDescription(offer);
+
+      sendWSWithLog({
+        type: "webrtc-offer",
         targetId,
-        attachRemoteStream,
-        { getCallId: () => callIdRef.current }
-      );
-      attachPCGuards(newPc);
-      setPc(newPc);
-      pcRef.current = newPc;
-      peerIdRef.current = targetId;
-      pcToUse = newPc;
-    }
+        offer,
+        callerId: user?.id,
+        callId: callIdRef.current,
+        deviceId: DEVICE_ID,
+      });
+    },
+    [startLocalStream, attachRemoteStream, user, attachPCGuards, role]
+  );
 
-    // ✅ doplň toto:
-    attachMicToPc(pcToUse, localStreamRef.current!);
-
-    const offer = await pcToUse.createOffer({ iceRestart: true });
-    await pcToUse.setLocalDescription(offer);
-
-    sendWS({
-      type: "webrtc-offer",
-      targetId,
-      offer,
-      callerId: user?.id,
-      callId: callIdRef.current,
-      deviceId: DEVICE_ID,
-    });
-  },
-  [startLocalStream, attachRemoteStream, user, attachPCGuards]
-);
   // ===== INIT (sync-user, fetch balance, connect WS, fallback)
   useEffect(() => {
     const init = async () => {
@@ -562,8 +593,14 @@ pendingCandidatesRef.current = [];
       // 2) Načítaj piatkový zostatok
       fetchFridayBalance();
 
-      // 3) Pripoj WS (ponechávam tvoje API connectWS – ak máš verziu s JWT, uprav tu)
+      // 3) Pripoj WS
       connectWS(user.id, role, async (msg) => {
+        console.log("[WS<-] recv", msg.type, {
+          from: msg.from,
+          deviceId: msg.deviceId,
+          hasCallId: !!msg.callId,
+        });
+
         if (msg.type === "incoming-call") {
           setIncomingCall({
             callId: String(msg.callId),
@@ -583,42 +620,31 @@ pendingCandidatesRef.current = [];
         }
 
         if (msg.type === "call-started") {
-        setIncomingCall(null);
-        setInCall(true);
-        setPeerAccepted(true); // ← admin prijal
-      }
-
+          setIncomingCall(null);
+          setInCall(true);
+          setPeerAccepted(true); // admin prijal
+        }
 
         if (msg.type === "end-call") {
           setIncomingCall(null);
-          await stopCall(undefined, false); // ✅ nepotvrdzuj späť
+          await stopCall(undefined, false); // nepotvrdzuj späť
         }
 
         if (msg.type === "call-locked") {
-  // Zhasni banner a zahoď všetko k tomuto prichádzajúcemu hovoru
-  setIncomingCall((prev) => {
-    // ak sedí callId, určite zhasni
-    if (prev && String(msg.callId || "") === prev.callId) return null;
-    // ak nesedí (alebo chýba), ale máme práve zobrazený prichádzajúci hovor,
-    // tiež zhasni – hovor už niekto prijal na inom zariadení
-    return null;
-  });
-  setPendingOffer(null);
-}
+          setIncomingCall(null);
+          setPendingOffer(null);
+        }
 
         if (msg.type === "webrtc-offer") {
-  const incomingCallId = typeof msg.callId === "string" ? msg.callId : null;
-  callIdRef.current = incomingCallId ?? callIdRef.current;
+          const incomingCallId = typeof msg.callId === "string" ? msg.callId : null;
+          callIdRef.current = incomingCallId ?? callIdRef.current;
 
-  // ✅ IBA uložiť ponuku a počkať na klik „Prijať“
-  setPendingOffer({
-    offer: msg.offer as RTCSessionDescriptionInit,
-    from: String(msg.callerId),
-  });
-
-  // (nič viac tu nerob – žiadne startLocalStream, žiadne setRemoteDescription/answer)
-}
-
+          // iba uložiť offer a počkať na „Prijať“
+          setPendingOffer({
+            offer: msg.offer as RTCSessionDescriptionInit,
+            from: String(msg.callerId),
+          });
+        }
 
         if (msg.type === "webrtc-answer") {
           if (!localStreamRef.current) await startLocalStream();
@@ -626,13 +652,17 @@ pendingCandidatesRef.current = [];
           await pcLocal.setRemoteDescription(
             new RTCSessionDescription(msg.answer as RTCSessionDescriptionInit)
           );
+
           // flush pending candidates
-for (const c of pendingCandidatesRef.current) {
-  try { await pcLocal.addIceCandidate(new RTCIceCandidate(c)); } catch (e) {
-    console.error("flush addIceCandidate:", e);
-  }
-}
-pendingCandidatesRef.current = [];
+          if (pendingCandidatesRef.current.length) {
+            console.log("Flushing buffered ICE:", pendingCandidatesRef.current.length);
+            for (const c of pendingCandidatesRef.current) {
+              try { await pcLocal.addIceCandidate(new RTCIceCandidate(c)); } catch (e) {
+                console.error("flush addIceCandidate:", e);
+              }
+            }
+            pendingCandidatesRef.current = [];
+          }
 
           callIdRef.current =
             typeof msg.callId === "string" ? msg.callId : callIdRef.current;
@@ -642,28 +672,26 @@ pendingCandidatesRef.current = [];
         }
 
         if (msg.type === "webrtc-candidate") {
-  const cand = msg.candidate as RTCIceCandidateInit;
-  const pcLocal = pcRef.current;
+          const cand = msg.candidate as RTCIceCandidateInit;
+          const pcLocal = pcRef.current;
 
-  if (!pcLocal) {
-    // ešte nemáme PC → ulož
-    pendingCandidatesRef.current.push(cand);
-    return;
-  }
+          if (!pcLocal) {
+            pendingCandidatesRef.current.push(cand);
+            return;
+          }
 
-  // ak remoteDescription ešte nie je nastavený, odlož
-  if (!pcLocal.remoteDescription) {
-    pendingCandidatesRef.current.push(cand);
-    return;
-  }
+          // ak remoteDescription ešte nie je nastavený, odlož
+          if (!pcLocal.remoteDescription) {
+            pendingCandidatesRef.current.push(cand);
+            return;
+          }
 
-  try {
-    await pcLocal.addIceCandidate(new RTCIceCandidate(cand));
-  } catch (e) {
-    console.error("addIceCandidate error:", e);
-  }
-}
-
+          try {
+            await pcLocal.addIceCandidate(new RTCIceCandidate(cand));
+          } catch (e) {
+            console.error("addIceCandidate error:", e);
+          }
+        }
 
         if (msg.type === "request-offer") {
           callIdRef.current =
@@ -851,13 +879,12 @@ pendingCandidatesRef.current = [];
                     Povoliť notifikácie
                   </button>
                 )}
-                  <button
-                    onClick={() => (window.location.href = "/burza-tokenov")}
-                    className="px-4 py-2 rounded-xl bg-amber-500 text-white shadow hover:bg-amber-600 transition"
-                  >
-                    Burza piatkových tokenov
-                  </button>
-                
+                <button
+                  onClick={() => (window.location.href = "/burza-tokenov")}
+                  className="px-4 py-2 rounded-xl bg-amber-500 text-white shadow hover:bg-amber-600 transition"
+                >
+                  Burza piatkových tokenov
+                </button>
               </div>
             </div>
           </section>

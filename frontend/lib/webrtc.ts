@@ -1,109 +1,68 @@
-// /lib/webrtc.ts
-// Spoľahlivé pripojenie mikrofónu + správne posielanie ICE kandidátov s deviceId & callId.
+// lib/webrtc.ts
 
-import { sendWS, DEVICE_ID } from "@/lib/wsClient";
+import { sendWS, DEVICE_ID } from "./wsClient";
 
-type CreatePcOptions = {
-  getCallId?: () => string | null | undefined;
-};
-
-/**
- * Pripojí/nahradí mikrofónový audio track do RTCPeerConnection.
- * - ak už audio sender existuje: replaceTrack(track)
- * - inak: addTrack(track, stream)
- */
-export function attachMicToPc(pc: RTCPeerConnection, stream: MediaStream) {
-  if (!pc || !stream) return;
-  const track = stream.getAudioTracks()[0];
-  if (!track) {
-    console.warn("attachMicToPc: stream nemá audio track.");
-    return;
-  }
-
-  // pre istotu zapni track
-  try {
-    track.enabled = true;
-  } catch {}
-
-  const existingSender = pc
-    .getSenders()
-    .find((s) => s.track?.kind === "audio");
-
-  if (existingSender) {
-    // nahradenie existujúceho tracku
-    existingSender.replaceTrack(track).catch((e) => {
-      console.error("replaceTrack error:", e);
-    });
-  } else {
-    // prvé pripojenie
-    try {
-      pc.addTrack(track, stream);
-    } catch (e) {
-      console.error("addTrack error:", e);
-    }
-  }
-}
-
-/**
- * Vytvorí a nakonfiguruje RTCPeerConnection.
- * - nastaví STUNy (možeš nahradiť za vlastné)
- * - pripojí mikrofón, ak je dostupný
- * - nastaví ontrack → odovzdá remote stream do callbacku
- * - posiela ICE kandidátov s deviceId a callId (dôležité pre multi-device)
- */
 export function createPeerConnection(
-  localStream: MediaStream | null,
+  localStream: MediaStream,
   targetId: string,
-  onRemoteStream: (stream: MediaStream) => void,
-  opts: CreatePcOptions = {}
-): RTCPeerConnection {
+  onRemoteStream: (s: MediaStream) => void,
+  opts?: { getCallId?: () => string | null }
+) {
   const pc = new RTCPeerConnection({
-  iceServers: [
-    { urls: "stun:stun.l.google.com:19302" } // free Google STUN
-  ]
-});
+    iceServers: [
+      { urls: "stun:stun.l.google.com:19302" },
+      {
+        urls: [
+          "turns:TURN_HOST:443?transport=tcp", // ← doplň svoj TURN server
+          "turn:TURN_HOST:3478?transport=udp",
+        ],
+        username: process.env.NEXT_PUBLIC_TURN_USER || "TURN_USER",
+        credential: process.env.NEXT_PUBLIC_TURN_PASS || "TURN_PASS",
+      },
+    ],
+  });
 
-
-  // Ak máme lokálny stream, pripoj mikrofón (nezakladá to duplicitné sendery, replaceTrack to kryje)
-  if (localStream) {
-    try {
-      attachMicToPc(pc, localStream);
-    } catch (e) {
-      console.error("attachMicToPc(initial) error:", e);
-    }
-  }
-
-  // Remote stream handling
+  // remote stream handler
   pc.ontrack = (ev) => {
-    // uprednostni stream z ev.streams, ak je k dispozícii
-    const remoteStream = ev.streams?.[0] ?? new MediaStream([ev.track]);
-    onRemoteStream(remoteStream);
+    if (ev.streams && ev.streams[0]) {
+      onRemoteStream(ev.streams[0]);
+    }
   };
 
-  // ICE candidates → WS (s deviceId + callId kvôli multi-device routingu)
-  pc.onicecandidate = (e) => {
-    if (!e.candidate) return;
-    try {
-      const callId = opts.getCallId?.() ?? null;
+  // ICE kandidáty posielaj hneď cez WS
+  pc.onicecandidate = (ev) => {
+    if (ev.candidate) {
       sendWS({
         type: "webrtc-candidate",
         targetId,
-        candidate: e.candidate,
-        callId,           // musí byť rovnaký ako pri offer/answer
+        candidate: ev.candidate.toJSON(),
+        callId: opts?.getCallId?.() || null,
         deviceId: DEVICE_ID,
       });
-    } catch (err) {
-      console.error("onicecandidate -> sendWS error:", err);
     }
   };
 
-  // Voliteľná diagnostika
-  pc.oniceconnectionstatechange = () => {
-    const s = pc.iceConnectionState;
-    if (s === "failed") {
-      console.warn("ICE failed; you may want to restart ICE.");
-    }
-  };
+  // pridaj lokálne tracky (ak sú)
+  if (localStream) {
+    localStream.getTracks().forEach((track) => {
+      pc.addTrack(track, localStream);
+    });
+  }
 
   return pc;
+}
+
+// Robustné pripojenie mikrofónu k peer connection
+export function attachMicToPc(pc: RTCPeerConnection, stream: MediaStream) {
+  const track = stream.getAudioTracks()[0];
+  if (!track) return;
+
+  const audioSender = pc.getSenders().find((s) => s.track?.kind === "audio");
+  if (audioSender) {
+    console.log("Replacing audio track in existing sender");
+    audioSender.replaceTrack(track);
+  } else {
+    console.log("Adding new audio track to PC");
+    pc.addTrack(track, stream);
+  }
 }
