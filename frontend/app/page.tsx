@@ -116,37 +116,46 @@ function stopCallTimer() {
 
   // ---------- Diagnostics helpers ----------
   function attachDeepRtcLogs(pc: RTCPeerConnection, tag: string) {
-    pc.onicegatheringstatechange = () => console.log(`[${tag}] iceGatheringState=`, pc.iceGatheringState);
-    pc.oniceconnectionstatechange = async () => {
-      const s = pc.iceConnectionState;
-      console.log(`[${tag}] iceConnectionState=`, s);
-      if (s === "disconnected") {
-        console.warn(`[${tag}] ICE disconnected → request-offer`);
-        if (peerIdRef.current) {
-          sendWSWithLog({ type: "request-offer", targetId: peerIdRef.current, callId: callIdRef.current });
-        }
-      }
-      if (s === "failed") {
-        console.warn(`[${tag}] ICE failed → iceRestart offer`);
-        if (peerIdRef.current) await sendNewOffer(peerIdRef.current);
-      }
-    };
-    pc.onsignalingstatechange = () => console.log(`[${tag}] signalingState=`, pc.signalingState);
-    pc.onconnectionstatechange = () => console.log(`[${tag}] connectionState=`, pc.connectionState);
-    pc.onicecandidateerror = (e: any) => console.warn(`[${tag}] onicecandidateerror`, e);
-    pc.onnegotiationneeded = () => console.log(`[${tag}] onnegotiationneeded`);
-pc.ontrack = (ev) => {
-  console.log(
-    "[TRACK] remote kind=", ev.track?.kind,
-    "muted=", ev.track?.muted,
-    "streams=", ev.streams?.[0]?.id
+  pc.addEventListener("icegatheringstatechange", () =>
+    console.log(`[${tag}] iceGatheringState=`, pc.iceGatheringState)
   );
-  ev.track.onunmute = () => console.log("[TRACK] remote onunmute");
-  ev.track.onmute = () => console.log("[TRACK] remote onmute");
-  attachRemoteStream(ev.streams[0]);
-  forcePlayRemoteAudio();
-};
-  }
+
+  pc.addEventListener("iceconnectionstatechange", async () => {
+    const s = pc.iceConnectionState;
+    console.log(`[${tag}] iceConnectionState=`, s);
+    if (s === "disconnected") {
+      console.warn(`[${tag}] ICE disconnected → request-offer`);
+      if (peerIdRef.current) {
+        sendWSWithLog({ type: "request-offer", targetId: peerIdRef.current, callId: callIdRef.current });
+      }
+    }
+    if (s === "failed") {
+      console.warn(`[${tag}] ICE failed → iceRestart offer`);
+      if (peerIdRef.current) await sendNewOffer(peerIdRef.current);
+    }
+  });
+
+  pc.addEventListener("signalingstatechange", () =>
+    console.log(`[${tag}] signalingState=`, pc.signalingState)
+  );
+  pc.addEventListener("connectionstatechange", () =>
+    console.log(`[${tag}] connectionState=`, pc.connectionState)
+  );
+  pc.addEventListener("icecandidateerror", (e: any) =>
+    console.warn(`[${tag}] onicecandidateerror`, e)
+  );
+  pc.addEventListener("negotiationneeded", () =>
+    console.log(`[${tag}] onnegotiationneeded`)
+  );
+
+  // iba logovanie trackov – NEPREPISUJEME attachPCGuards.ontrack
+  pc.addEventListener("track", (ev: any) => {
+    console.log(
+      "[TRACK]", { kind: ev.track?.kind, muted: ev.track?.muted, stream: ev.streams?.[0]?.id }
+    );
+  });
+}
+
 
   const sendWSWithLog = (payload: any) => {
     console.log("[WS->] sending", payload?.type, {
