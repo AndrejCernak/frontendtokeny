@@ -38,6 +38,12 @@ export default function HomePage() {
   user?.emailAddresses?.find((e: any) => e.id === user?.primaryEmailAddressId)?.emailAddress ||
   user?.emailAddresses?.[0]?.emailAddress ||
   "";
+  const displayName =
+  (user?.fullName && user.fullName.trim()) ||
+  [user?.firstName, user?.lastName].filter(Boolean).join(" ").trim() ||
+  (user?.username as string) ||
+  userEmail ||
+  "Neznámy";
 
   // ——— Call state
   const [incomingCall, setIncomingCall] = useState<IncomingCall | null>(null);
@@ -604,9 +610,10 @@ async function logAudioStats(pc: RTCPeerConnection, tag: string) {
     sendWSWithLog({
       type: "call-request",
       targetId,
-      callerName: user?.fullName || userEmail || "Neznámy",
+      callerName: displayName,
       callerEmail: userEmail,
     });
+
     sendWSWithLog({
       type: "webrtc-offer",
       targetId,
@@ -614,10 +621,9 @@ async function logAudioStats(pc: RTCPeerConnection, tag: string) {
       callerId: user?.id,
       callId: callIdRef.current,
       deviceId: DEVICE_ID,
-      callerName: user?.fullName || userEmail || "Neznámy",
+      callerName: displayName,
       callerEmail: userEmail,
     });
-
 
     setInCall(true);
     if (statsTimer) clearInterval(statsTimer);
@@ -734,8 +740,8 @@ async function logAudioStats(pc: RTCPeerConnection, tag: string) {
             from: String(msg.callerId),
             callerName: nameOrEmail,
           });
-          callIdRef.current = typeof msg.callId === "string" ? msg.callId : null;
         }
+
 
 
         if (msg.type === "insufficient-friday-tokens") {
@@ -991,7 +997,7 @@ async function logAudioStats(pc: RTCPeerConnection, tag: string) {
             <div className="flex items-center justify-between flex-wrap gap-3">
               <div>
                 <p className="text-sm text-stone-500">Prihlásený používateľ</p>
-                <p className="font-medium">{user?.fullName || userEmail}</p>
+                <p className="font-medium">{displayName}</p>
                 <p className="text-sm text-stone-600 mt-1">
                   Piatkové minúty:{" "}
                   <span className="font-semibold">{fridayMinutesRemaining} min</span>
