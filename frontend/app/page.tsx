@@ -33,6 +33,12 @@ export default function HomePage() {
   const { getToken } = useAuth();
   const role = (user?.publicMetadata.role as string) || "client";
 
+  const userEmail =
+  (user?.primaryEmailAddress && (user.primaryEmailAddress as any).emailAddress) ||
+  user?.emailAddresses?.find((e: any) => e.id === user?.primaryEmailAddressId)?.emailAddress ||
+  user?.emailAddresses?.[0]?.emailAddress ||
+  "";
+
   // ——— Call state
   const [incomingCall, setIncomingCall] = useState<IncomingCall | null>(null);
   const [, setPc] = useState<RTCPeerConnection | null>(null);
@@ -46,6 +52,37 @@ export default function HomePage() {
   });
   const [isMuted, setIsMuted] = useState(false);
   const [inCall, setInCall] = useState(false);
+
+  // ——— Call timer
+const [callStartAt, setCallStartAt] = useState<number | null>(null);
+const [callElapsed, setCallElapsed] = useState<number>(0); // sekundy
+const callElapsedTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+function formatElapsed(sec: number) {
+  const m = Math.floor(sec / 60);
+  const s = sec % 60;
+  return `${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
+}
+
+function startCallTimer() {
+  if (callElapsedTimerRef.current) clearInterval(callElapsedTimerRef.current);
+  const start = Date.now();
+  setCallStartAt(start);
+  setCallElapsed(0);
+  callElapsedTimerRef.current = setInterval(() => {
+    setCallElapsed(Math.floor((Date.now() - start) / 1000));
+  }, 1000);
+}
+
+function stopCallTimer() {
+  if (callElapsedTimerRef.current) {
+    clearInterval(callElapsedTimerRef.current);
+    callElapsedTimerRef.current = null;
+  }
+  setCallStartAt(null);
+  setCallElapsed(0);
+}
+
 
   // ——— Balances
   const [fridayMinutesRemaining, setFridayMinutesRemaining] = useState<number>(0);
@@ -253,6 +290,7 @@ async function logAudioStats(pc: RTCPeerConnection, tag: string) {
       } catch {}
     }
 
+    stopCallTimer(); // ✅ pre istotu zastav aj tu
     // UI/reset stavov
     setIncomingCall(null);
     setIsMuted(false);
@@ -306,19 +344,25 @@ async function logAudioStats(pc: RTCPeerConnection, tag: string) {
         if (s === "connected") {
           setPeerAccepted(true);
           setRemoteConnected(true);
+          startCallTimer(); // ✅ spusti timer
         }
         if (s === "disconnected" || s === "failed" || s === "closed") {
           setRemoteConnected(false);
+          stopCallTimer(); // ✅ zastav timer
           hardResetPeerLocally();
         }
       };
 
+      ;
+
       // Keď dorazí prvý remote track, určite sme „napojení“
       peer.ontrack = (ev) => {
-        attachRemoteStream(ev.streams[0]);
-        setPeerAccepted(true);
-        setRemoteConnected(true);
-      };
+      attachRemoteStream(ev.streams[0]);
+      setPeerAccepted(true);
+      setRemoteConnected(true);
+      startCallTimer(); // ✅ spusti timer
+    };
+
     },
     [attachRemoteStream, hardResetPeerLocally]
   );
@@ -326,6 +370,7 @@ async function logAudioStats(pc: RTCPeerConnection, tag: string) {
   const stopCall = useCallback(
     async (targetId?: string, notify = true) => {
       try {
+        stopCallTimer(); // ✅ zastav timer
         const id = targetId ?? peerIdRef.current ?? undefined;
         if (id && notify) {
           sendWSWithLog({ type: "end-call", targetId: id, callId: callIdRef.current });
@@ -559,7 +604,8 @@ async function logAudioStats(pc: RTCPeerConnection, tag: string) {
     sendWSWithLog({
       type: "call-request",
       targetId,
-      callerName: user?.fullName || "Neznámy",
+      callerName: user?.fullName || userEmail || "Neznámy",
+      callerEmail: userEmail,
     });
     sendWSWithLog({
       type: "webrtc-offer",
@@ -568,7 +614,10 @@ async function logAudioStats(pc: RTCPeerConnection, tag: string) {
       callerId: user?.id,
       callId: callIdRef.current,
       deviceId: DEVICE_ID,
+      callerName: user?.fullName || userEmail || "Neznámy",
+      callerEmail: userEmail,
     });
+
 
     setInCall(true);
     if (statsTimer) clearInterval(statsTimer);
@@ -676,13 +725,18 @@ async function logAudioStats(pc: RTCPeerConnection, tag: string) {
         });
 
         if (msg.type === "incoming-call") {
+          const nameOrEmail =
+            (msg.callerName as string) ||
+            (msg.callerEmail as string) ||
+            "Neznámy";
           setIncomingCall({
             callId: String(msg.callId),
             from: String(msg.callerId),
-            callerName: String(msg.callerName),
+            callerName: nameOrEmail,
           });
           callIdRef.current = typeof msg.callId === "string" ? msg.callId : null;
         }
+
 
         if (msg.type === "insufficient-friday-tokens") {
           alert(
@@ -937,7 +991,7 @@ async function logAudioStats(pc: RTCPeerConnection, tag: string) {
             <div className="flex items-center justify-between flex-wrap gap-3">
               <div>
                 <p className="text-sm text-stone-500">Prihlásený používateľ</p>
-                <p className="font-medium">{user?.fullName}</p>
+                <p className="font-medium">{user?.fullName || userEmail}</p>
                 <p className="text-sm text-stone-600 mt-1">
                   Piatkové minúty:{" "}
                   <span className="font-semibold">{fridayMinutesRemaining} min</span>
@@ -967,17 +1021,26 @@ async function logAudioStats(pc: RTCPeerConnection, tag: string) {
             <div className="flex items-center justify-between gap-4 flex-wrap">
               <div className="flex-1">
                 <h2 className="text-lg font-semibold mb-1">Stav hovoru</h2>
-                <p className="text-stone-600 text-sm">
-                  {incomingCall
-                    ? `Prichádzajúci hovor od: ${incomingCall.callerName}`
-                    : inCall && !peerAccepted
-                    ? "Volám… Čakám na prijatie druhej strany."
-                    : inCall && peerAccepted && !remoteConnected
-                    ? "Prijaté, pripájam…"
-                    : inCall && remoteConnected
-                    ? "Prebieha hovor – pripojené."
-                    : "Pripravený na hovor"}
+                <p className="text-stone-600 text-sm flex items-center gap-3">
+                  <span>
+                    {incomingCall
+                      ? `Prichádzajúci hovor od: ${incomingCall.callerName}`
+                      : inCall && !peerAccepted
+                      ? "Volám… Čakám na prijatie druhej strany."
+                      : inCall && peerAccepted && !remoteConnected
+                      ? "Prijaté, pripájam…"
+                      : inCall && remoteConnected
+                      ? "Prebieha hovor – pripojené."
+                      : "Pripravený na hovor"}
+                  </span>
+
+                  {inCall && (peerAccepted || remoteConnected) && callStartAt && (
+                    <span className="px-2 py-1 rounded-md bg-stone-100 border border-stone-200 font-mono tabular-nums">
+                      {formatElapsed(callElapsed)}
+                    </span>
+                  )}
                 </p>
+
 
                 <p className="text-xs text-stone-500 mt-1">
                   {isFriday
