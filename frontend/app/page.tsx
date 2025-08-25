@@ -129,7 +129,6 @@ export default function HomePage() {
 
   const enumerateOutputs = useCallback(async () => {
     try {
-      // getUserMedia is needed to reveal device labels in most browsers
       if (!localStreamRef.current) {
         await navigator.mediaDevices.getUserMedia({ audio: true });
       }
@@ -138,9 +137,8 @@ export default function HomePage() {
         .filter((d) => d.kind === "audiooutput")
         .map((d) => ({ deviceId: d.deviceId, label: d.label || "Audio výstup" }));
       setAudioOutputs(outs);
-      // pick a default 'speaker-like' device if present
       const speakerish = outs.find((o) => /speaker|reprodukt/i.test(o.label));
-      setSelectedSinkId((speakerish?.deviceId || outs[0]?.deviceId || "") as string);
+      setSelectedSinkId((speakerish?.deviceId || outs[0]?.deviceId || "default") as string);
     } catch (e) {
       // ignore – some platforms (iOS Safari) don't expose outputs
     }
@@ -151,9 +149,9 @@ export default function HomePage() {
       try {
         const a = remoteAudioRef.current as any;
         if (!a || typeof a.setSinkId !== "function") return;
-        await a.setSinkId(sinkId);
+        await a.setSinkId(sinkId || "default");
       } catch (e) {
-        // ignore
+        console.warn("setSinkId failed", e);
       }
     },
     []
@@ -194,10 +192,7 @@ export default function HomePage() {
     );
 
     pc.addEventListener("track", (ev: any) => {
-      console.log(
-        "[TRACK]",
-        { kind: ev.track?.kind, muted: ev.track?.muted, stream: ev.streams?.[0]?.id }
-      );
+      console.log("[TRACK]", { kind: ev.track?.kind, muted: ev.track?.muted, stream: ev.streams?.[0]?.id });
     });
   }
 
@@ -242,7 +237,6 @@ export default function HomePage() {
 
       localStreamRef.current = stream;
 
-      // ak už PC existuje, pripoj/nahraď mic track do existujúceho PC
       if (pcRef.current) {
         attachMicToPc(pcRef.current, stream);
       }
@@ -286,26 +280,34 @@ export default function HomePage() {
       .catch((err) => console.warn("[AUDIO] play() failed:", err?.name, err?.message));
   }
 
-  // --- STATS: sleduj bajty dnu/von (voliteľné logovanie)
-  let statsTimer: ReturnType<typeof setInterval> | null = null;
-  async function logAudioStats(pc: RTCPeerConnection, tag: string) {
-    try {
-      const stats = await pc.getStats();
-      let inBytes = 0,
-        outBytes = 0,
-        jitter = 0;
-      stats.forEach((r: any) => {
-        if (r.type === "inbound-rtp" && r.kind === "audio") {
-          inBytes = r.bytesReceived || 0;
-          jitter = r.jitter || 0;
-        }
-        if (r.type === "outbound-rtp" && r.kind === "audio") {
-          outBytes = r.bytesSent || 0;
-        }
-      });
-      console.log(`[STATS ${tag}] inBytes=${inBytes} outBytes=${outBytes} jitter=${jitter}`);
-    } catch {}
-  }
+  // --- STATS: useRef to avoid crashes/leaks across renders
+  const statsTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const startStats = useCallback((tag: string) => {
+    if (statsTimerRef.current) clearInterval(statsTimerRef.current);
+    if (!pcRef.current) return;
+    statsTimerRef.current = setInterval(async () => {
+      try {
+        const stats = await pcRef.current!.getStats();
+        let inBytes = 0,
+          outBytes = 0,
+          jitter = 0;
+        stats.forEach((r: any) => {
+          if (r.type === "inbound-rtp" && r.kind === "audio") {
+            inBytes = r.bytesReceived || 0;
+            jitter = r.jitter || 0;
+          }
+          if (r.type === "outbound-rtp" && r.kind === "audio") {
+            outBytes = r.bytesSent || 0;
+          }
+        });
+        console.log(`[STATS ${tag}] inBytes=${inBytes} outBytes=${outBytes} jitter=${jitter}`);
+      } catch {}
+    }, 2000);
+  }, []);
+  const stopStats = useCallback(() => {
+    if (statsTimerRef.current) clearInterval(statsTimerRef.current);
+    statsTimerRef.current = null;
+  }, []);
 
   const clearCallTimer = () => {
     if (callTimerRef.current) {
@@ -354,6 +356,7 @@ export default function HomePage() {
       } catch {}
     }
 
+    stopStats();
     stopCallTimer();
     setIncomingCall(null);
     setIsMuted(false);
@@ -366,14 +369,49 @@ export default function HomePage() {
       pendingCandidatesRef.current = [];
       setPendingOffer(null);
     }
-    if (statsTimer) {
-      clearInterval(statsTimer);
-      statsTimer = null;
-    }
-  }, []);
+  }, [stopStats]);
+
+  const attachPCGuards = useCallback(
+    (peer: RTCPeerConnection) => {
+      peer.onconnectionstatechange = () => {
+        const s = peer.connectionState;
+        if (s === "connected") {
+          setPeerAccepted(true);
+          setRemoteConnected(true);
+          startCallTimer();
+          detectSinkSupport();
+          // try to apply sink if supported (safe no-op otherwise)
+          applySink(selectedSinkId);
+          startStats(role === "admin" ? "ADMIN" : "CLIENT");
+        }
+        if (s === "disconnected" || s === "failed" || s === "closed") {
+          setRemoteConnected(false);
+          stopCallTimer();
+          stopStats();
+          hardResetPeerLocally();
+        }
+      };
+
+      peer.ontrack = (ev) => {
+        attachRemoteStream(ev.streams[0]);
+        setPeerAccepted(true);
+        setRemoteConnected(true);
+        startCallTimer();
+        detectSinkSupport();
+        applySink(selectedSinkId);
+        startStats(role === "admin" ? "ADMIN" : "CLIENT");
+      };
+    },
+    [attachRemoteStream, hardResetPeerLocally, detectSinkSupport, selectedSinkId, applySink, startStats, stopStats, role]
+  );
 
   const ensureFreshPC = useCallback(
-    (targetId: string) => {
+    async (targetId: string) => {
+      // Guarantee we have a local stream before creating PC
+      if (!localStreamRef.current) {
+        await startLocalStream();
+        if (!localStreamRef.current) throw new Error("No local stream available");
+      }
       const stale =
         pcRef.current &&
         (pcRef.current.connectionState === "closed" ||
@@ -394,38 +432,7 @@ export default function HomePage() {
       }
       return pcRef.current!;
     },
-    [attachRemoteStream, role]
-  );
-
-  const attachPCGuards = useCallback(
-    (peer: RTCPeerConnection) => {
-      peer.onconnectionstatechange = () => {
-        const s = peer.connectionState;
-        if (s === "connected") {
-          setPeerAccepted(true);
-          setRemoteConnected(true);
-          startCallTimer();
-          // keď nadviažeme hovor, nastav preferovaný výstup (ak je podporovaný)
-          detectSinkSupport();
-          if (sinkSupport && selectedSinkId) applySink(selectedSinkId);
-        }
-        if (s === "disconnected" || s === "failed" || s === "closed") {
-          setRemoteConnected(false);
-          stopCallTimer();
-          hardResetPeerLocally();
-        }
-      };
-
-      peer.ontrack = (ev) => {
-        attachRemoteStream(ev.streams[0]);
-        setPeerAccepted(true);
-        setRemoteConnected(true);
-        startCallTimer();
-        detectSinkSupport();
-        if (sinkSupport && selectedSinkId) applySink(selectedSinkId);
-      };
-    },
-    [attachRemoteStream, hardResetPeerLocally, detectSinkSupport, sinkSupport, selectedSinkId, applySink]
+    [attachRemoteStream, role, startLocalStream, attachPCGuards]
   );
 
   const stopCall = useCallback(
@@ -472,12 +479,9 @@ export default function HomePage() {
         callIdRef.current = null;
         await fetchFridayBalance();
       }
-      if (statsTimer) {
-        clearInterval(statsTimer);
-        statsTimer = null;
-      }
+      stopStats();
     },
-    [fetchFridayBalance]
+    [fetchFridayBalance, stopStats]
   );
 
   type TransceiverDirWritable = RTCRtpTransceiver & {
@@ -494,6 +498,7 @@ export default function HomePage() {
       setIncomingCall(null);
 
       await startLocalStream();
+      if (!localStreamRef.current) return alert("Mikrofón nie je dostupný");
 
       const newPc = createPeerConnection(
         localStreamRef.current!,
@@ -515,10 +520,12 @@ export default function HomePage() {
       }
 
       try {
+        if (newPc.signalingState !== "stable") {
+          await newPc.setLocalDescription(); // no-op ensures stable transitions
+        }
         await newPc.setRemoteDescription(new RTCSessionDescription(po.offer));
 
         if (pendingCandidatesRef.current.length) {
-          console.log("Flushing buffered ICE (admin):", pendingCandidatesRef.current.length);
           for (const c of pendingCandidatesRef.current) {
             try {
               await newPc.addIceCandidate(new RTCIceCandidate(c));
@@ -556,39 +563,26 @@ export default function HomePage() {
           deviceId: DEVICE_ID,
         });
 
-        if (remoteAudioRef.current) {
-          try {
-            await remoteAudioRef.current.play();
-          } catch {}
-        }
+        try {
+          await remoteAudioRef.current?.play?.();
+        } catch {}
 
         setPendingOffer(null);
         setInCall(true);
-        if (statsTimer) clearInterval(statsTimer);
-        statsTimer = setInterval(() => {
-          if (pcRef.current) logAudioStats(pcRef.current, "ADMIN");
-        }, 2000);
 
         if (callTimerRef.current) clearTimeout(callTimerRef.current);
         callTimerRef.current = setTimeout(() => {
-          const states = {
-            ice: pcRef.current?.iceConnectionState,
-            conn: pcRef.current?.connectionState,
-          } as const;
-          console.warn("Safety timeout hit (60s). States:", states);
-          if (
+          const failed =
             pcRef.current?.connectionState === "failed" ||
-            pcRef.current?.iceConnectionState === "failed"
-          ) {
-            hardResetPeerLocally();
-          }
+            pcRef.current?.iceConnectionState === "failed";
+          if (failed) hardResetPeerLocally();
         }, 60000);
       } catch (err) {
         console.error("handleAccept error:", err);
         hardResetPeerLocally();
       }
     },
-    [pendingOffer, startLocalStream, attachRemoteStream, attachPCGuards, sendWSWithLog, setIncomingCall, setPendingOffer, setInCall, hardResetPeerLocally]
+    [pendingOffer, startLocalStream, attachRemoteStream, attachPCGuards, sendWSWithLog, hardResetPeerLocally]
   );
 
   const handleCall = useCallback(async () => {
@@ -612,6 +606,7 @@ export default function HomePage() {
     }
 
     if (!localStreamRef.current) await startLocalStream();
+    if (!localStreamRef.current) return alert("Mikrofón nie je dostupný");
 
     const targetId = adminId;
     const newPc = createPeerConnection(
@@ -646,32 +641,22 @@ export default function HomePage() {
     });
 
     setInCall(true);
-    if (statsTimer) clearInterval(statsTimer);
-    statsTimer = setInterval(() => {
-      if (pcRef.current) logAudioStats(pcRef.current, "CLIENT");
-    }, 2000);
 
     if (callTimerRef.current) clearTimeout(callTimerRef.current);
     callTimerRef.current = setTimeout(() => {
-      const states = {
-        ice: pcRef.current?.iceConnectionState,
-        conn: pcRef.current?.connectionState,
-      } as const;
-      console.warn("Safety timeout hit (60s). States:", states);
-      if (
+      const failed =
         pcRef.current?.connectionState === "failed" ||
-        pcRef.current?.iceConnectionState === "failed"
-      ) {
-        hardResetPeerLocally();
-      }
+        pcRef.current?.iceConnectionState === "failed";
+      if (failed) hardResetPeerLocally();
     }, 60000);
-  }, [user, isFriday, fetchFridayBalance, startLocalStream, attachRemoteStream, adminId, hardResetPeerLocally, attachPCGuards, nudgeAudio]);
+  }, [user, isFriday, fetchFridayBalance, startLocalStream, attachRemoteStream, adminId, hardResetPeerLocally, attachPCGuards, nudgeAudio, displayName, userEmail]);
 
   const sendNewOffer = useCallback(
     async (targetId: string) => {
       if (!localStreamRef.current) {
         await startLocalStream();
       }
+      if (!localStreamRef.current) return;
 
       let pcToUse = pcRef.current;
       if (!pcToUse || ["closed", "failed"].includes(pcToUse.connectionState)) {
@@ -763,12 +748,15 @@ export default function HomePage() {
         }
 
         if (msg.type === "webrtc-answer") {
-          if (!localStreamRef.current) await startLocalStream();
-          const pcLocal = ensureFreshPC(String(msg.callerId));
-          await pcLocal.setRemoteDescription(new RTCSessionDescription(msg.answer as RTCSessionDescriptionInit));
+          await ensureFreshPC(String(msg.callerId));
+          const pcLocal = pcRef.current!;
+          try {
+            await pcLocal.setRemoteDescription(new RTCSessionDescription(msg.answer as RTCSessionDescriptionInit));
+          } catch (e) {
+            console.error("setRemoteDescription failed", e);
+          }
 
           if (pendingCandidatesRef.current.length) {
-            console.log("Flushing buffered ICE:", pendingCandidatesRef.current.length);
             for (const c of pendingCandidatesRef.current) {
               try {
                 await pcLocal.addIceCandidate(new RTCIceCandidate(c));
@@ -789,12 +777,7 @@ export default function HomePage() {
           const cand = msg.candidate as RTCIceCandidateInit;
           const pcLocal = pcRef.current;
 
-          if (!pcLocal) {
-            pendingCandidatesRef.current.push(cand);
-            return;
-          }
-
-          if (!pcLocal.remoteDescription) {
+          if (!pcLocal || !pcLocal.remoteDescription) {
             pendingCandidatesRef.current.push(cand);
             return;
           }
@@ -827,7 +810,6 @@ export default function HomePage() {
         }
       } catch {}
 
-      // Init audio devices capabilities once
       detectSinkSupport();
       enumerateOutputs();
     };
@@ -852,8 +834,9 @@ export default function HomePage() {
     return () => {
       clearCallTimer();
       document.removeEventListener("visibilitychange", onVis);
+      stopStats();
     };
-  }, [isSignedIn, user, role, startLocalStream, attachRemoteStream, fetchFridayBalance, stopCall, sendNewOffer, backend, getToken, attachPCGuards, ensureFreshPC, detectSinkSupport, enumerateOutputs]);
+  }, [isSignedIn, user, role, fetchFridayBalance, backend, getToken, stopCall, sendNewOffer, ensureFreshPC, detectSinkSupport, enumerateOutputs, stopStats]);
 
   // ===== Auto-register push when granted =====
   useEffect(() => {
@@ -879,67 +862,40 @@ export default function HomePage() {
     autoRegisterPush();
   }, [isSignedIn, user, backend, getToken]);
 
-  const handleEnableNotifications = useCallback(async () => {
-    try {
-      const permission = await Notification.requestPermission();
-      if (permission !== "granted") {
-        alert("Notifikácie neboli povolené.");
-        return;
-      }
-      const token = await requestFcmToken();
-      if (!token || !user) {
-        alert("Nepodarilo sa získať FCM token.");
-        return;
-      }
-      const role = (user.publicMetadata.role as string) || "client";
-      const jwt = await getToken();
-
-      const res = await fetch(`${backend}/register-fcm`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json", Authorization: `Bearer ${jwt}` },
-        body: JSON.stringify({ fcmToken: token, role, platform: "web" }),
-      });
-      if (res.ok) {
-        setHasNotifications(true);
-        if (typeof window !== "undefined") localStorage.setItem("fcm-enabled", "1");
-        alert("Notifikácie boli povolené ✅");
-      } else {
-        alert("Chyba pri registrácii tokenu.");
-      }
-    } catch (err) {
-      console.error("FCM chyba:", err);
-      alert("Nastala chyba pri nastavovaní notifikácií.");
-    }
-  }, [backend, user, getToken]);
-
   // ===== NEW: Speaker / Earpiece toggle logic =====
   const handleSpeakerToggle = useCallback(async () => {
-    // UI-first toggle
-    setSpeakerMode((prev) => !prev);
+    const next = !speakerMode; // compute next first to avoid stale state
+    setSpeakerMode(next);
     const a = remoteAudioRef.current as any;
     if (!a) return;
 
-    // If setSinkId is supported, try to switch to a more "speaker-ish" device when ON,
-    // or back to default/communications when OFF
     if (typeof a.setSinkId === "function" && audioOutputs.length) {
-      // Heuristics: choose device containing "speaker" when speakerMode true, else choose first non-speaker (often earpiece/communications on desktops)
       const speaker = audioOutputs.find((d) => /speaker|reprodukt/i.test(d.label));
       const comm = audioOutputs.find((d) => /communication|slúchad|ear|phone|receiver/i.test(d.label));
-
-      const nextId = !speakerMode
-        ? (speaker?.deviceId || selectedSinkId)
-        : (comm?.deviceId || "default");
-
+      const nextId = next ? (speaker?.deviceId || selectedSinkId || "default") : (comm?.deviceId || "default");
       setSelectedSinkId(nextId);
       await applySink(nextId);
     } else {
-      // Fallback (iOS Safari / unsupported): small trick – pausing and resuming sometimes nudges the OS route when user changed system output
       try {
         await a.pause();
         await a.play();
       } catch {}
     }
   }, [audioOutputs, speakerMode, selectedSinkId, applySink]);
+
+  // ===== Enable Notifications Handler =====
+  const handleEnableNotifications = useCallback(async () => {
+    if (typeof window === "undefined" || typeof Notification === "undefined") return;
+    try {
+      const permission = await Notification.requestPermission();
+      if (permission === "granted") {
+        setHasNotifications(true);
+        if (typeof window !== "undefined") localStorage.setItem("fcm-enabled", "1");
+      }
+    } catch (e) {
+      console.error("Failed to enable notifications", e);
+    }
+  }, []);
 
   // =================== UI ===================
   return (
@@ -998,13 +954,10 @@ export default function HomePage() {
           <section className="rounded-3xl overflow-hidden border border-stone-200 shadow-sm">
             {/* Top area: big gradient tile acting like phone in-call screen */}
             <div className="relative isolate bg-gradient-to-br from-emerald-600 to-amber-500 text-white p-6 sm:p-8">
-              {/* soft glow */}
               <div className="absolute inset-0 -z-10 opacity-20" style={{ background: "radial-gradient(1200px 400px at 20% 10%, rgba(255,255,255,.6), transparent)" }} />
 
               <div className="flex items-start sm:items-center justify-between gap-6 flex-col sm:flex-row">
-                {/* Contact / State */}
                 <div className="flex items-center gap-4">
-                  {/* Avatar bubble (initials) */}
                   <div className="h-14 w-14 sm:h-16 sm:w-16 rounded-2xl bg-white/15 backdrop-blur flex items-center justify-center shadow-inner">
                     <span className="text-xl font-bold">
                       {displayName
@@ -1021,7 +974,6 @@ export default function HomePage() {
                       {incomingCall ? incomingCall.callerName : displayName}
                     </h2>
 
-                    {/* timer / status */}
                     <div className="mt-1 flex items-center gap-2 text-white/90 text-sm">
                       {inCall && (peerAccepted || remoteConnected) && callStartAt ? (
                         <span className="font-mono tabular-nums px-2 py-0.5 rounded-md bg-white/10">
@@ -1045,7 +997,7 @@ export default function HomePage() {
                   </div>
                 </div>
 
-                {/* Animated call waves (visual "telefonuje sa" feeling) */}
+                {/* Animated call waves */}
                 <div className="flex items-center gap-1 h-12">
                   <span className="w-1.5 rounded-full bg-white/70 animate-[pulse_1.4s_ease-in-out_infinite]" />
                   <span className="w-1.5 rounded-full bg-white/60 animate-[pulse_1.6s_ease-in-out_infinite]" />
@@ -1054,7 +1006,6 @@ export default function HomePage() {
                 </div>
               </div>
 
-              {/* Big controls (floating) */}
               <div className="mt-6 flex flex-wrap items-center gap-3">
                 {user?.publicMetadata.role === "client" && (
                   <button
@@ -1107,8 +1058,9 @@ export default function HomePage() {
                     className="px-3 py-2 rounded-xl border border-stone-300 bg-white shadow-sm text-sm"
                     value={selectedSinkId}
                     onChange={async (e) => {
-                      setSelectedSinkId(e.target.value);
-                      await applySink(e.target.value);
+                      const v = e.target.value || "default";
+                      setSelectedSinkId(v);
+                      await applySink(v);
                     }}
                   >
                     {audioOutputs.map((o) => (
@@ -1143,7 +1095,6 @@ export default function HomePage() {
               </div>
             </div>
 
-            {/* hidden media element */}
             <audio ref={remoteAudioRef} autoPlay playsInline className="hidden" />
           </section>
 
