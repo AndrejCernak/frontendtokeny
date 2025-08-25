@@ -19,7 +19,13 @@ import { requestFcmToken } from "@/lib/firebase";
 import { connectWS, sendWS, DEVICE_ID } from "@/lib/wsClient";
 import { attachMicToPc, createPeerConnection } from "@/lib/webrtc";
 
+// ---------------- Types ----------------
 type IncomingCall = { callId: string; from: string; callerName: string };
+
+type AudioOutputDevice = {
+  deviceId: string;
+  label: string;
+};
 
 function isFridayInBratislava(d = new Date()) {
   const local = new Date(
@@ -28,22 +34,23 @@ function isFridayInBratislava(d = new Date()) {
   return local.getDay() === 5; // 0=Sun ... 5=Fri
 }
 
+// ---------------- Component ----------------
 export default function HomePage() {
   const { user, isSignedIn } = useUser();
   const { getToken } = useAuth();
   const role = (user?.publicMetadata.role as string) || "client";
 
   const userEmail =
-  (user?.primaryEmailAddress && (user.primaryEmailAddress as any).emailAddress) ||
-  user?.emailAddresses?.find((e: any) => e.id === user?.primaryEmailAddressId)?.emailAddress ||
-  user?.emailAddresses?.[0]?.emailAddress ||
-  "";
+    (user?.primaryEmailAddress && (user.primaryEmailAddress as any).emailAddress) ||
+    user?.emailAddresses?.find((e: any) => e.id === user?.primaryEmailAddressId)?.emailAddress ||
+    user?.emailAddresses?.[0]?.emailAddress ||
+    "";
   const displayName =
-  (user?.fullName && user.fullName.trim()) ||
-  [user?.firstName, user?.lastName].filter(Boolean).join(" ").trim() ||
-  (user?.username as string) ||
-  userEmail ||
-  "Neznámy";
+    (user?.fullName && user.fullName.trim()) ||
+    [user?.firstName, user?.lastName].filter(Boolean).join(" ").trim() ||
+    (user?.username as string) ||
+    userEmail ||
+    "Neznámy";
 
   // ——— Call state
   const [incomingCall, setIncomingCall] = useState<IncomingCall | null>(null);
@@ -60,37 +67,36 @@ export default function HomePage() {
   const [inCall, setInCall] = useState(false);
 
   // ——— Call timer
-const [callStartAt, setCallStartAt] = useState<number | null>(null);
-const [callElapsed, setCallElapsed] = useState<number>(0); // sekundy
-const callElapsedTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const [callStartAt, setCallStartAt] = useState<number | null>(null);
+  const [callElapsed, setCallElapsed] = useState<number>(0); // sekundy
+  const callElapsedTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
-function formatElapsed(sec: number) {
-  const m = Math.floor(sec / 60);
-  const s = sec % 60;
-  return `${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
-}
-
-function startCallTimer() {
-  if (callElapsedTimerRef.current) clearInterval(callElapsedTimerRef.current);
-  const start = Date.now();
-  setCallStartAt(start);
-  setCallElapsed(0);
-  callElapsedTimerRef.current = setInterval(() => {
-    setCallElapsed(Math.floor((Date.now() - start) / 1000));
-  }, 1000);
-}
-
-function stopCallTimer() {
-  if (callElapsedTimerRef.current) {
-    clearInterval(callElapsedTimerRef.current);
-    callElapsedTimerRef.current = null;
+  function formatElapsed(sec: number) {
+    const m = Math.floor(sec / 60);
+    const s = sec % 60;
+    return `${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
   }
-  setCallStartAt(null);
-  setCallElapsed(0);
-}
 
+  function startCallTimer() {
+    if (callElapsedTimerRef.current) clearInterval(callElapsedTimerRef.current);
+    const start = Date.now();
+    setCallStartAt(start);
+    setCallElapsed(0);
+    callElapsedTimerRef.current = setInterval(() => {
+      setCallElapsed(Math.floor((Date.now() - start) / 1000));
+    }, 1000);
+  }
 
-  // ——— Balances
+  function stopCallTimer() {
+    if (callElapsedTimerRef.current) {
+      clearInterval(callElapsedTimerRef.current);
+      callElapsedTimerRef.current = null;
+    }
+    setCallStartAt(null);
+    setCallElapsed(0);
+  }
+
+  // ——— Friday minutes
   const [fridayMinutesRemaining, setFridayMinutesRemaining] = useState<number>(0);
   const isFriday = useMemo(() => isFridayInBratislava(), []);
 
@@ -110,52 +116,90 @@ function stopCallTimer() {
     from: string;
   } | null>(null);
 
-  // ===== Backend helpers =====
-  const backend = process.env.NEXT_PUBLIC_BACKEND_URL!;
-  const adminId = process.env.NEXT_PUBLIC_ADMIN_ID as string;
+  // ===== NEW: audio outputs ("reproduktor" vs "pri uchu") =====
+  const [audioOutputs, setAudioOutputs] = useState<AudioOutputDevice[]>([]);
+  const [selectedSinkId, setSelectedSinkId] = useState<string>("");
+  const [speakerMode, setSpeakerMode] = useState<boolean>(true); // true=reproduktor, false=pri uchu
+  const [sinkSupport, setSinkSupport] = useState<boolean>(false);
+
+  const detectSinkSupport = useCallback(() => {
+    const a = remoteAudioRef.current as any;
+    setSinkSupport(!!(a && typeof a.setSinkId === "function"));
+  }, []);
+
+  const enumerateOutputs = useCallback(async () => {
+    try {
+      // getUserMedia is needed to reveal device labels in most browsers
+      if (!localStreamRef.current) {
+        await navigator.mediaDevices.getUserMedia({ audio: true });
+      }
+      const devices = await navigator.mediaDevices.enumerateDevices();
+      const outs = devices
+        .filter((d) => d.kind === "audiooutput")
+        .map((d) => ({ deviceId: d.deviceId, label: d.label || "Audio výstup" }));
+      setAudioOutputs(outs);
+      // pick a default 'speaker-like' device if present
+      const speakerish = outs.find((o) => /speaker|reprodukt/i.test(o.label));
+      setSelectedSinkId((speakerish?.deviceId || outs[0]?.deviceId || "") as string);
+    } catch (e) {
+      // ignore – some platforms (iOS Safari) don't expose outputs
+    }
+  }, []);
+
+  const applySink = useCallback(
+    async (sinkId: string) => {
+      try {
+        const a = remoteAudioRef.current as any;
+        if (!a || typeof a.setSinkId !== "function") return;
+        await a.setSinkId(sinkId);
+      } catch (e) {
+        // ignore
+      }
+    },
+    []
+  );
 
   // ---------- Diagnostics helpers ----------
   function attachDeepRtcLogs(pc: RTCPeerConnection, tag: string) {
-  pc.addEventListener("icegatheringstatechange", () =>
-    console.log(`[${tag}] iceGatheringState=`, pc.iceGatheringState)
-  );
-
-  pc.addEventListener("iceconnectionstatechange", async () => {
-    const s = pc.iceConnectionState;
-    console.log(`[${tag}] iceConnectionState=`, s);
-    if (s === "disconnected") {
-      console.warn(`[${tag}] ICE disconnected → request-offer`);
-      if (peerIdRef.current) {
-        sendWSWithLog({ type: "request-offer", targetId: peerIdRef.current, callId: callIdRef.current });
-      }
-    }
-    if (s === "failed") {
-      console.warn(`[${tag}] ICE failed → iceRestart offer`);
-      if (peerIdRef.current) await sendNewOffer(peerIdRef.current);
-    }
-  });
-
-  pc.addEventListener("signalingstatechange", () =>
-    console.log(`[${tag}] signalingState=`, pc.signalingState)
-  );
-  pc.addEventListener("connectionstatechange", () =>
-    console.log(`[${tag}] connectionState=`, pc.connectionState)
-  );
-  pc.addEventListener("icecandidateerror", (e: any) =>
-    console.warn(`[${tag}] onicecandidateerror`, e)
-  );
-  pc.addEventListener("negotiationneeded", () =>
-    console.log(`[${tag}] onnegotiationneeded`)
-  );
-
-  // iba logovanie trackov – NEPREPISUJEME attachPCGuards.ontrack
-  pc.addEventListener("track", (ev: any) => {
-    console.log(
-      "[TRACK]", { kind: ev.track?.kind, muted: ev.track?.muted, stream: ev.streams?.[0]?.id }
+    pc.addEventListener("icegatheringstatechange", () =>
+      console.log(`[${tag}] iceGatheringState=`, pc.iceGatheringState)
     );
-  });
-}
 
+    pc.addEventListener("iceconnectionstatechange", async () => {
+      const s = pc.iceConnectionState;
+      console.log(`[${tag}] iceConnectionState=`, s);
+      if (s === "disconnected") {
+        console.warn(`[${tag}] ICE disconnected → request-offer`);
+        if (peerIdRef.current) {
+          sendWSWithLog({ type: "request-offer", targetId: peerIdRef.current, callId: callIdRef.current });
+        }
+      }
+      if (s === "failed") {
+        console.warn(`[${tag}] ICE failed → iceRestart offer`);
+        if (peerIdRef.current) await sendNewOffer(peerIdRef.current);
+      }
+    });
+
+    pc.addEventListener("signalingstatechange", () =>
+      console.log(`[${tag}] signalingState=`, pc.signalingState)
+    );
+    pc.addEventListener("connectionstatechange", () =>
+      console.log(`[${tag}] connectionState=`, pc.connectionState)
+    );
+    pc.addEventListener("icecandidateerror", (e: any) =>
+      console.warn(`[${tag}] onicecandidateerror`, e)
+    );
+    pc.addEventListener("negotiationneeded", () =>
+      console.log(`[${tag}] onnegotiationneeded`)
+    );
+
+    pc.addEventListener("track", (ev: any) => {
+      console.log(
+        "[TRACK]",
+        { kind: ev.track?.kind, muted: ev.track?.muted, stream: ev.streams?.[0]?.id }
+      );
+    });
+  }
 
   const sendWSWithLog = (payload: any) => {
     console.log("[WS->] sending", payload?.type, {
@@ -165,6 +209,9 @@ function stopCallTimer() {
     });
     sendWS(payload);
   };
+
+  const backend = process.env.NEXT_PUBLIC_BACKEND_URL!;
+  const adminId = process.env.NEXT_PUBLIC_ADMIN_ID as string;
 
   const fetchFridayBalance = useCallback(async () => {
     if (!user) return 0;
@@ -193,7 +240,6 @@ function stopCallTimer() {
         at.onended = () => console.log("[MIC] track ended");
       }
 
-
       localStreamRef.current = stream;
 
       // ak už PC existuje, pripoj/nahraď mic track do existujúceho PC
@@ -219,44 +265,47 @@ function stopCallTimer() {
       remoteAudioRef.current.srcObject = stream;
       remoteAudioRef.current.play().catch(() => {});
       forcePlayRemoteAudio();
-
     }
   }, []);
 
-  // --- AUDIO: vynútené prehratie a event logy
-function forcePlayRemoteAudio() {
-  const a = remoteAudioRef.current;
-  if (!a) return;
-  a.muted = false;
-  a.volume = 1.0;
-  (a as any).playsInline = true; // iOS
-  a.autoplay = true;
+  function forcePlayRemoteAudio() {
+    const a = remoteAudioRef.current;
+    if (!a) return;
+    a.muted = false;
+    a.volume = 1.0;
+    (a as any).playsInline = true; // iOS
+    a.autoplay = true;
 
-  a.onplay = () => console.log("[AUDIO] onplay");
-  a.onpause = () => console.log("[AUDIO] onpause");
-  a.oncanplay = () => console.log("[AUDIO] oncanplay");
-  a.onerror = (e) => console.log("[AUDIO] onerror", e);
+    a.onplay = () => console.log("[AUDIO] onplay");
+    a.onpause = () => console.log("[AUDIO] onpause");
+    a.oncanplay = () => console.log("[AUDIO] oncanplay");
+    a.onerror = (e) => console.log("[AUDIO] onerror", e);
 
-  a.play()
-    .then(() => console.log("[AUDIO] play() resolved; readyState=", a.readyState, "paused=", a.paused))
-    .catch(err => console.warn("[AUDIO] play() failed:", err?.name, err?.message));
-}
+    a.play()
+      .then(() => console.log("[AUDIO] play() resolved; readyState=", a.readyState, "paused=", a.paused))
+      .catch((err) => console.warn("[AUDIO] play() failed:", err?.name, err?.message));
+  }
 
-// --- STATS: sleduj bajty dnu/von (na odhalenie, či tečie audio)
-let statsTimer: ReturnType<typeof setInterval> | null = null;
-
-async function logAudioStats(pc: RTCPeerConnection, tag: string) {
-  try {
-    const stats = await pc.getStats();
-    let inBytes = 0, outBytes = 0, jitter = 0;
-    stats.forEach((r: any) => {
-      if (r.type === "inbound-rtp" && r.kind === "audio") { inBytes = r.bytesReceived || 0; jitter = r.jitter || 0; }
-      if (r.type === "outbound-rtp" && r.kind === "audio") { outBytes = r.bytesSent || 0; }
-    });
-    console.log(`[STATS ${tag}] inBytes=${inBytes} outBytes=${outBytes} jitter=${jitter}`);
-  } catch {}
-}
-
+  // --- STATS: sleduj bajty dnu/von (voliteľné logovanie)
+  let statsTimer: ReturnType<typeof setInterval> | null = null;
+  async function logAudioStats(pc: RTCPeerConnection, tag: string) {
+    try {
+      const stats = await pc.getStats();
+      let inBytes = 0,
+        outBytes = 0,
+        jitter = 0;
+      stats.forEach((r: any) => {
+        if (r.type === "inbound-rtp" && r.kind === "audio") {
+          inBytes = r.bytesReceived || 0;
+          jitter = r.jitter || 0;
+        }
+        if (r.type === "outbound-rtp" && r.kind === "audio") {
+          outBytes = r.bytesSent || 0;
+        }
+      });
+      console.log(`[STATS ${tag}] inBytes=${inBytes} outBytes=${outBytes} jitter=${jitter}`);
+    } catch {}
+  }
 
   const clearCallTimer = () => {
     if (callTimerRef.current) {
@@ -265,20 +314,20 @@ async function logAudioStats(pc: RTCPeerConnection, tag: string) {
     }
   };
 
-  // tiché „prebudenie“ audio na iOS pred prvým play()
   const nudgeAudio = useCallback(() => {
     const a = remoteAudioRef.current;
     if (!a) return;
     try {
       a.muted = true;
-      a.play().then(() => {
-        a.pause();
-        a.muted = false;
-      }).catch(() => {});
+      a.play()
+        .then(() => {
+          a.pause();
+          a.muted = false;
+        })
+        .catch(() => {});
     } catch {}
   }, []);
 
-  // 🔧 tvrdý lokálny reset peeru/streamov/audia bez WS správ
   const hardResetPeerLocally = useCallback((opts?: { preserveSignaling?: boolean }) => {
     try {
       if (pcRef.current) {
@@ -305,8 +354,7 @@ async function logAudioStats(pc: RTCPeerConnection, tag: string) {
       } catch {}
     }
 
-    stopCallTimer(); // ✅ pre istotu zastav aj tu
-    // UI/reset stavov
+    stopCallTimer();
     setIncomingCall(null);
     setIsMuted(false);
     setInCall(false);
@@ -318,14 +366,12 @@ async function logAudioStats(pc: RTCPeerConnection, tag: string) {
       pendingCandidatesRef.current = [];
       setPendingOffer(null);
     }
-  if (statsTimer) {
-  clearInterval(statsTimer);
-  statsTimer = null;
-}
-
+    if (statsTimer) {
+      clearInterval(statsTimer);
+      statsTimer = null;
+    }
   }, []);
 
-  // helper: ak PC neexistuje alebo je closed/failed, vytvor nový
   const ensureFreshPC = useCallback(
     (targetId: string) => {
       const stale =
@@ -351,7 +397,6 @@ async function logAudioStats(pc: RTCPeerConnection, tag: string) {
     [attachRemoteStream, role]
   );
 
-  // malý guard na PC stav (ak spadne, uprac, nech ďalšie volanie ide hneď)
   const attachPCGuards = useCallback(
     (peer: RTCPeerConnection) => {
       peer.onconnectionstatechange = () => {
@@ -359,33 +404,34 @@ async function logAudioStats(pc: RTCPeerConnection, tag: string) {
         if (s === "connected") {
           setPeerAccepted(true);
           setRemoteConnected(true);
-          startCallTimer(); // ✅ spusti timer
+          startCallTimer();
+          // keď nadviažeme hovor, nastav preferovaný výstup (ak je podporovaný)
+          detectSinkSupport();
+          if (sinkSupport && selectedSinkId) applySink(selectedSinkId);
         }
         if (s === "disconnected" || s === "failed" || s === "closed") {
           setRemoteConnected(false);
-          stopCallTimer(); // ✅ zastav timer
+          stopCallTimer();
           hardResetPeerLocally();
         }
       };
 
-      ;
-
-      // Keď dorazí prvý remote track, určite sme „napojení“
       peer.ontrack = (ev) => {
-      attachRemoteStream(ev.streams[0]);
-      setPeerAccepted(true);
-      setRemoteConnected(true);
-      startCallTimer(); // ✅ spusti timer
-    };
-
+        attachRemoteStream(ev.streams[0]);
+        setPeerAccepted(true);
+        setRemoteConnected(true);
+        startCallTimer();
+        detectSinkSupport();
+        if (sinkSupport && selectedSinkId) applySink(selectedSinkId);
+      };
     },
-    [attachRemoteStream, hardResetPeerLocally]
+    [attachRemoteStream, hardResetPeerLocally, detectSinkSupport, sinkSupport, selectedSinkId, applySink]
   );
 
   const stopCall = useCallback(
     async (targetId?: string, notify = true) => {
       try {
-        stopCallTimer(); // ✅ zastav timer
+        stopCallTimer();
         const id = targetId ?? peerIdRef.current ?? undefined;
         if (id && notify) {
           sendWSWithLog({ type: "end-call", targetId: id, callId: callIdRef.current });
@@ -396,12 +442,16 @@ async function logAudioStats(pc: RTCPeerConnection, tag: string) {
           pcRef.current.ontrack = null;
           pcRef.current.onconnectionstatechange = null;
           pcRef.current.getSenders().forEach((s) => s.track && s.track.stop());
-          try { pcRef.current.close(); } catch {}
+          try {
+            pcRef.current.close();
+          } catch {}
         }
         pcRef.current = null;
         setPc(null);
 
-        try { localStreamRef.current?.getTracks().forEach((t) => t.stop()); } catch {}
+        try {
+          localStreamRef.current?.getTracks().forEach((t) => t.stop());
+        } catch {}
         localStreamRef.current = null;
 
         if (remoteAudioRef.current) {
@@ -422,14 +472,12 @@ async function logAudioStats(pc: RTCPeerConnection, tag: string) {
         callIdRef.current = null;
         await fetchFridayBalance();
       }
-    if (statsTimer) {
-  clearInterval(statsTimer);
-  statsTimer = null;
-}
-
+      if (statsTimer) {
+        clearInterval(statsTimer);
+        statsTimer = null;
+      }
     },
     [fetchFridayBalance]
-    
   );
 
   type TransceiverDirWritable = RTCRtpTransceiver & {
@@ -440,20 +488,13 @@ async function logAudioStats(pc: RTCPeerConnection, tag: string) {
   // ===== Accept / Call =====
   const handleAccept = useCallback(
     async (targetId: string) => {
-      // reset bez zmazania signalizačných bufferov (offer + ICE)
       hardResetPeerLocally({ preserveSignaling: true });
       setPeerAccepted(false);
       setRemoteConnected(false);
       setIncomingCall(null);
 
-      // vždy načítaj mikrofón nanovo
       await startLocalStream();
-      console.log(
-        "Admin local tracks:",
-        localStreamRef.current?.getTracks()?.map((t) => `${t.kind}:${t.readyState}`)
-      );
 
-      // vytvor nové PC
       const newPc = createPeerConnection(
         localStreamRef.current!,
         targetId,
@@ -467,7 +508,6 @@ async function logAudioStats(pc: RTCPeerConnection, tag: string) {
       peerIdRef.current = targetId;
       (window as any).debugPeer = newPc;
 
-      // musí existovať pending offer
       const po = pendingOffer;
       if (!po?.offer) {
         console.error("Žiadna pending offer pri prijatí hovoru.");
@@ -475,21 +515,20 @@ async function logAudioStats(pc: RTCPeerConnection, tag: string) {
       }
 
       try {
-        // nastav remote offer
         await newPc.setRemoteDescription(new RTCSessionDescription(po.offer));
 
-        // flush pending candidates (prišli pred answerom)
         if (pendingCandidatesRef.current.length) {
           console.log("Flushing buffered ICE (admin):", pendingCandidatesRef.current.length);
           for (const c of pendingCandidatesRef.current) {
-            try { await newPc.addIceCandidate(new RTCIceCandidate(c)); } catch (e) {
+            try {
+              await newPc.addIceCandidate(new RTCIceCandidate(c));
+            } catch (e) {
               console.error("flush addIceCandidate (admin):", e);
             }
           }
           pendingCandidatesRef.current = [];
         }
 
-        // vynúť audio transceiver na 'sendrecv'
         let at = newPc.getTransceivers().find(
           (t) =>
             t.receiver?.track?.kind === "audio" ||
@@ -502,18 +541,13 @@ async function logAudioStats(pc: RTCPeerConnection, tag: string) {
           else if (typeof at.direction !== "undefined") at.direction = "sendrecv";
         }
 
-        // pripoj/nahraď mikrofón do PC
         if (localStreamRef.current) {
           attachMicToPc(newPc, localStreamRef.current);
-          console.log("Admin senders:",
-            newPc.getSenders().map(s => s.track && `${s.track.kind}:${s.track.readyState}`));
         }
 
-        // vytvor a nastav answer
         const answer = await newPc.createAnswer();
         await newPc.setLocalDescription(answer);
 
-        // pošli answer späť volajúcemu
         sendWSWithLog({
           type: "webrtc-answer",
           targetId,
@@ -522,7 +556,6 @@ async function logAudioStats(pc: RTCPeerConnection, tag: string) {
           deviceId: DEVICE_ID,
         });
 
-        // skús spustiť prehrávanie remote audia (mobilné prehliadače)
         if (remoteAudioRef.current) {
           try {
             await remoteAudioRef.current.play();
@@ -536,14 +569,12 @@ async function logAudioStats(pc: RTCPeerConnection, tag: string) {
           if (pcRef.current) logAudioStats(pcRef.current, "ADMIN");
         }, 2000);
 
-
-        // bezpečnostný timeout – len pri skutočnom faili
         if (callTimerRef.current) clearTimeout(callTimerRef.current);
         callTimerRef.current = setTimeout(() => {
           const states = {
             ice: pcRef.current?.iceConnectionState,
             conn: pcRef.current?.connectionState,
-          };
+          } as const;
           console.warn("Safety timeout hit (60s). States:", states);
           if (
             pcRef.current?.connectionState === "failed" ||
@@ -557,23 +588,12 @@ async function logAudioStats(pc: RTCPeerConnection, tag: string) {
         hardResetPeerLocally();
       }
     },
-    [
-      pendingOffer,
-      startLocalStream,
-      attachRemoteStream,
-      attachPCGuards,
-      sendWSWithLog,
-      setIncomingCall,
-      setPendingOffer,
-      setInCall,
-      hardResetPeerLocally,
-    ]
+    [pendingOffer, startLocalStream, attachRemoteStream, attachPCGuards, sendWSWithLog, setIncomingCall, setPendingOffer, setInCall, hardResetPeerLocally]
   );
 
   const handleCall = useCallback(async () => {
     if (!user) return;
 
-    // čistý lokálny reset pred novým hovorom
     hardResetPeerLocally();
     setPeerAccepted(false);
     setRemoteConnected(false);
@@ -585,14 +605,11 @@ async function logAudioStats(pc: RTCPeerConnection, tag: string) {
     if (isFriday) {
       const m = await fetchFridayBalance();
       if (m <= 0) {
-        alert(
-          "V piatok môžeš volať iba s piatkovými tokenmi. Skús kúpiť token alebo burzu."
-        );
+        alert("V piatok môžeš volať iba s piatkovými tokenmi. Skús kúpiť token alebo burzu.");
         window.location.href = "/burza-tokenov";
         return;
       }
     }
-    // mimo piatku: volanie zadarmo
 
     if (!localStreamRef.current) await startLocalStream();
 
@@ -610,18 +627,12 @@ async function logAudioStats(pc: RTCPeerConnection, tag: string) {
     peerIdRef.current = targetId;
     (window as any).debugPeer = newPc;
 
-    // pripoj mic
     attachMicToPc(newPc, localStreamRef.current!);
 
     const offer = await newPc.createOffer();
     await newPc.setLocalDescription(offer);
 
-    sendWSWithLog({
-      type: "call-request",
-      targetId,
-      callerName: displayName,
-      callerEmail: userEmail,
-    });
+    sendWSWithLog({ type: "call-request", targetId, callerName: displayName, callerEmail: userEmail });
 
     sendWSWithLog({
       type: "webrtc-offer",
@@ -636,18 +647,16 @@ async function logAudioStats(pc: RTCPeerConnection, tag: string) {
 
     setInCall(true);
     if (statsTimer) clearInterval(statsTimer);
-      statsTimer = setInterval(() => {
-        if (pcRef.current) logAudioStats(pcRef.current, "CLIENT");
-      }, 2000);
+    statsTimer = setInterval(() => {
+      if (pcRef.current) logAudioStats(pcRef.current, "CLIENT");
+    }, 2000);
 
-
-    // bezpečnostný timeout – len pri skutočnom faili
     if (callTimerRef.current) clearTimeout(callTimerRef.current);
     callTimerRef.current = setTimeout(() => {
       const states = {
         ice: pcRef.current?.iceConnectionState,
         conn: pcRef.current?.connectionState,
-      };
+      } as const;
       console.warn("Safety timeout hit (60s). States:", states);
       if (
         pcRef.current?.connectionState === "failed" ||
@@ -656,17 +665,7 @@ async function logAudioStats(pc: RTCPeerConnection, tag: string) {
         hardResetPeerLocally();
       }
     }, 60000);
-  }, [
-    user,
-    isFriday,
-    fetchFridayBalance,
-    startLocalStream,
-    attachRemoteStream,
-    adminId,
-    hardResetPeerLocally,
-    attachPCGuards,
-    nudgeAudio,
-  ]);
+  }, [user, isFriday, fetchFridayBalance, startLocalStream, attachRemoteStream, adminId, hardResetPeerLocally, attachPCGuards, nudgeAudio]);
 
   const sendNewOffer = useCallback(
     async (targetId: string) => {
@@ -708,55 +707,34 @@ async function logAudioStats(pc: RTCPeerConnection, tag: string) {
     [startLocalStream, attachRemoteStream, user, attachPCGuards, role]
   );
 
-  // ===== INIT (sync-user, fetch balance, connect WS, fallback)
+  // ===== INIT (sync-user, balance, WS, REST fallback) =====
   useEffect(() => {
     const init = async () => {
       if (!isSignedIn || !user) return;
 
-      // 1) Sync user do DB (server si vytiahne userId z Bearer JWT)
       try {
         const jwt = await getToken();
         await fetch(`${backend}/sync-user`, {
           method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            Authorization: `Bearer ${jwt}`,
-          },
+          headers: { "Content-Type": "application/json", Authorization: `Bearer ${jwt}` },
           body: JSON.stringify({}),
         });
       } catch {
         console.error("sync-user FE error");
       }
 
-      // 2) Načítaj piatkový zostatok
       fetchFridayBalance();
 
-      // 3) Pripoj WS
       connectWS(user.id, role, async (msg) => {
-        console.log("[WS<-] recv", msg.type, {
-          from: msg.from,
-          deviceId: msg.deviceId,
-          hasCallId: !!msg.callId,
-        });
+        console.log("[WS<-] recv", msg.type, { from: msg.from, deviceId: msg.deviceId, hasCallId: !!msg.callId });
 
         if (msg.type === "incoming-call") {
-          const nameOrEmail =
-            (msg.callerName as string) ||
-            (msg.callerEmail as string) ||
-            "Neznámy";
-          setIncomingCall({
-            callId: String(msg.callId),
-            from: String(msg.callerId),
-            callerName: nameOrEmail,
-          });
+          const nameOrEmail = (msg.callerName as string) || (msg.callerEmail as string) || "Neznámy";
+          setIncomingCall({ callId: String(msg.callId), from: String(msg.callerId), callerName: nameOrEmail });
         }
 
-
-
         if (msg.type === "insufficient-friday-tokens") {
-          alert(
-            "V piatok môžeš volať iba s piatkovými tokenmi. Skús kúpiť token alebo burzu."
-          );
+          alert("V piatok môžeš volať iba s piatkovými tokenmi. Skús kúpiť token alebo burzu.");
           setInCall(false);
           clearCallTimer();
           window.location.href = "/burza-tokenov";
@@ -765,12 +743,12 @@ async function logAudioStats(pc: RTCPeerConnection, tag: string) {
         if (msg.type === "call-started") {
           setIncomingCall(null);
           setInCall(true);
-          setPeerAccepted(true); // admin prijal
+          setPeerAccepted(true);
         }
 
         if (msg.type === "end-call") {
           setIncomingCall(null);
-          await stopCall(undefined, false); // nepotvrdzuj späť
+          await stopCall(undefined, false);
         }
 
         if (msg.type === "call-locked") {
@@ -781,34 +759,27 @@ async function logAudioStats(pc: RTCPeerConnection, tag: string) {
         if (msg.type === "webrtc-offer") {
           const incomingCallId = typeof msg.callId === "string" ? msg.callId : null;
           callIdRef.current = incomingCallId ?? callIdRef.current;
-
-          // iba uložiť offer a počkať na „Prijať“
-          setPendingOffer({
-            offer: msg.offer as RTCSessionDescriptionInit,
-            from: String(msg.callerId),
-          });
+          setPendingOffer({ offer: msg.offer as RTCSessionDescriptionInit, from: String(msg.callerId) });
         }
 
         if (msg.type === "webrtc-answer") {
           if (!localStreamRef.current) await startLocalStream();
           const pcLocal = ensureFreshPC(String(msg.callerId));
-          await pcLocal.setRemoteDescription(
-            new RTCSessionDescription(msg.answer as RTCSessionDescriptionInit)
-          );
+          await pcLocal.setRemoteDescription(new RTCSessionDescription(msg.answer as RTCSessionDescriptionInit));
 
-          // flush pending candidates
           if (pendingCandidatesRef.current.length) {
             console.log("Flushing buffered ICE:", pendingCandidatesRef.current.length);
             for (const c of pendingCandidatesRef.current) {
-              try { await pcLocal.addIceCandidate(new RTCIceCandidate(c)); } catch (e) {
+              try {
+                await pcLocal.addIceCandidate(new RTCIceCandidate(c));
+              } catch (e) {
                 console.error("flush addIceCandidate:", e);
               }
             }
             pendingCandidatesRef.current = [];
           }
 
-          callIdRef.current =
-            typeof msg.callId === "string" ? msg.callId : callIdRef.current;
+          callIdRef.current = typeof msg.callId === "string" ? msg.callId : callIdRef.current;
           try {
             remoteAudioRef.current?.play?.();
           } catch {}
@@ -823,7 +794,6 @@ async function logAudioStats(pc: RTCPeerConnection, tag: string) {
             return;
           }
 
-          // ak remoteDescription ešte nie je nastavený, odlož
           if (!pcLocal.remoteDescription) {
             pendingCandidatesRef.current.push(cand);
             return;
@@ -837,8 +807,7 @@ async function logAudioStats(pc: RTCPeerConnection, tag: string) {
         }
 
         if (msg.type === "request-offer") {
-          callIdRef.current =
-            typeof msg.callId === "string" ? msg.callId : callIdRef.current;
+          callIdRef.current = typeof msg.callId === "string" ? msg.callId : callIdRef.current;
           await sendNewOffer(String(msg.from));
         }
 
@@ -850,42 +819,31 @@ async function logAudioStats(pc: RTCPeerConnection, tag: string) {
       // 4) REST fallback – ak ušla WS správa alebo sa app otvorila z pushky
       try {
         const jwt = await getToken();
-        const res = await fetch(`${backend}/calls/pending`, {
-          headers: { Authorization: `Bearer ${jwt}` },
-        });
+        const res = await fetch(`${backend}/calls/pending`, { headers: { Authorization: `Bearer ${jwt}` } });
         const data = await res.json();
         if (data?.pending) {
-          setIncomingCall({
-            callId: String(data.pending.callId),
-            from: String(data.pending.callerId),
-            callerName: String(data.pending.callerName),
-          });
-          callIdRef.current =
-            typeof data.pending.callId === "string" ? data.pending.callId : null;
+          setIncomingCall({ callId: String(data.pending.callId), from: String(data.pending.callerId), callerName: String(data.pending.callerName) });
+          callIdRef.current = typeof data.pending.callId === "string" ? data.pending.callId : null;
         }
       } catch {}
+
+      // Init audio devices capabilities once
+      detectSinkSupport();
+      enumerateOutputs();
     };
 
     init();
 
-    // keď sa tab stane viditeľným (otvorenie z notifikácie), skús znova REST fallback
     const onVis = async () => {
       if (document.visibilityState !== "visible") return;
       if (!isSignedIn || !user) return;
       const jwt = await getToken();
       try {
-        const res = await fetch(`${backend}/calls/pending`, {
-          headers: { Authorization: `Bearer ${jwt}` },
-        });
+        const res = await fetch(`${backend}/calls/pending`, { headers: { Authorization: `Bearer ${jwt}` } });
         const data = await res.json();
         if (data?.pending) {
-          setIncomingCall({
-            callId: String(data.pending.callId),
-            from: String(data.pending.callerId),
-            callerName: String(data.pending.callerName),
-          });
-          callIdRef.current =
-            typeof data.pending.callId === "string" ? data.pending.callId : null;
+          setIncomingCall({ callId: String(data.pending.callId), from: String(data.pending.callerId), callerName: String(data.pending.callerName) });
+          callIdRef.current = typeof data.pending.callId === "string" ? data.pending.callId : null;
         }
       } catch {}
     };
@@ -895,22 +853,9 @@ async function logAudioStats(pc: RTCPeerConnection, tag: string) {
       clearCallTimer();
       document.removeEventListener("visibilitychange", onVis);
     };
-  }, [
-    isSignedIn,
-    user,
-    role,
-    startLocalStream,
-    attachRemoteStream,
-    fetchFridayBalance,
-    stopCall,
-    sendNewOffer,
-    backend,
-    getToken,
-    attachPCGuards,
-    ensureFreshPC,
-  ]);
+  }, [isSignedIn, user, role, startLocalStream, attachRemoteStream, fetchFridayBalance, stopCall, sendNewOffer, backend, getToken, attachPCGuards, ensureFreshPC, detectSinkSupport, enumerateOutputs]);
 
-  // ===== Auto-register push on app start when already granted =====
+  // ===== Auto-register push when granted =====
   useEffect(() => {
     const autoRegisterPush = async () => {
       if (!isSignedIn || !user) return;
@@ -923,15 +868,8 @@ async function logAudioStats(pc: RTCPeerConnection, tag: string) {
 
         await fetch(`${backend}/register-fcm`, {
           method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            Authorization: `Bearer ${jwt}`,
-          },
-          body: JSON.stringify({
-            fcmToken: token,
-            role,
-            platform: "web",
-          }),
+          headers: { "Content-Type": "application/json", Authorization: `Bearer ${jwt}` },
+          body: JSON.stringify({ fcmToken: token, role, platform: "web" }),
         });
 
         setHasNotifications(true);
@@ -958,15 +896,8 @@ async function logAudioStats(pc: RTCPeerConnection, tag: string) {
 
       const res = await fetch(`${backend}/register-fcm`, {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${jwt}`,
-        },
-        body: JSON.stringify({
-          fcmToken: token,
-          role,
-          platform: "web",
-        }),
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${jwt}` },
+        body: JSON.stringify({ fcmToken: token, role, platform: "web" }),
       });
       if (res.ok) {
         setHasNotifications(true);
@@ -981,12 +912,42 @@ async function logAudioStats(pc: RTCPeerConnection, tag: string) {
     }
   }, [backend, user, getToken]);
 
+  // ===== NEW: Speaker / Earpiece toggle logic =====
+  const handleSpeakerToggle = useCallback(async () => {
+    // UI-first toggle
+    setSpeakerMode((prev) => !prev);
+    const a = remoteAudioRef.current as any;
+    if (!a) return;
+
+    // If setSinkId is supported, try to switch to a more "speaker-ish" device when ON,
+    // or back to default/communications when OFF
+    if (typeof a.setSinkId === "function" && audioOutputs.length) {
+      // Heuristics: choose device containing "speaker" when speakerMode true, else choose first non-speaker (often earpiece/communications on desktops)
+      const speaker = audioOutputs.find((d) => /speaker|reprodukt/i.test(d.label));
+      const comm = audioOutputs.find((d) => /communication|slúchad|ear|phone|receiver/i.test(d.label));
+
+      const nextId = !speakerMode
+        ? (speaker?.deviceId || selectedSinkId)
+        : (comm?.deviceId || "default");
+
+      setSelectedSinkId(nextId);
+      await applySink(nextId);
+    } else {
+      // Fallback (iOS Safari / unsupported): small trick – pausing and resuming sometimes nudges the OS route when user changed system output
+      try {
+        await a.pause();
+        await a.play();
+      } catch {}
+    }
+  }, [audioOutputs, speakerMode, selectedSinkId, applySink]);
+
+  // =================== UI ===================
   return (
     <main className="min-h-screen bg-gradient-to-br from-stone-100 via-emerald-50 to-amber-50 text-stone-800">
       <div className="max-w-3xl mx-auto p-6">
         <header className="flex items-center justify-between mb-6">
           <div className="flex items-center gap-3">
-            <div className="h-10 w-10 rounded-2xl bg-emerald-600/10 flex items-center justify-center shadow-inner">
+            <div className="h-11 w-11 rounded-2xl bg-emerald-600/10 flex items-center justify-center shadow-inner">
               <span className="text-emerald-700 font-bold">🔊</span>
             </div>
             <h1 className="text-2xl font-semibold tracking-tight">Audio hovory</h1>
@@ -1002,6 +963,7 @@ async function logAudioStats(pc: RTCPeerConnection, tag: string) {
         </header>
 
         <SignedIn>
+          {/* USER CARD */}
           <section className="rounded-2xl bg-white/80 backdrop-blur shadow-sm border border-stone-200 p-5 mb-5">
             <div className="flex items-center justify-between flex-wrap gap-3">
               <div>
@@ -1032,86 +994,156 @@ async function logAudioStats(pc: RTCPeerConnection, tag: string) {
             </div>
           </section>
 
-          <section className="rounded-2xl bg-white/80 backdrop-blur shadow-sm border border-stone-200 p-6">
-            <div className="flex items-center justify-between gap-4 flex-wrap">
-              <div className="flex-1">
-                <h2 className="text-lg font-semibold mb-1">Stav hovoru</h2>
-                <p className="text-stone-600 text-sm flex items-center gap-3">
-                  <span>
-                    {incomingCall
-                      ? `Prichádzajúci hovor od: ${incomingCall.callerName}`
-                      : inCall && !peerAccepted
-                      ? "Volám… Čakám na prijatie druhej strany."
-                      : inCall && peerAccepted && !remoteConnected
-                      ? "Prijaté, pripájam…"
-                      : inCall && remoteConnected
-                      ? "Prebieha hovor – pripojené."
-                      : "Pripravený na hovor"}
-                  </span>
+          {/* CALL HUD */}
+          <section className="rounded-3xl overflow-hidden border border-stone-200 shadow-sm">
+            {/* Top area: big gradient tile acting like phone in-call screen */}
+            <div className="relative isolate bg-gradient-to-br from-emerald-600 to-amber-500 text-white p-6 sm:p-8">
+              {/* soft glow */}
+              <div className="absolute inset-0 -z-10 opacity-20" style={{ background: "radial-gradient(1200px 400px at 20% 10%, rgba(255,255,255,.6), transparent)" }} />
 
-                  {inCall && (peerAccepted || remoteConnected) && callStartAt && (
-                    <span className="px-2 py-1 rounded-md bg-stone-100 border border-stone-200 font-mono tabular-nums">
-                      {formatElapsed(callElapsed)}
+              <div className="flex items-start sm:items-center justify-between gap-6 flex-col sm:flex-row">
+                {/* Contact / State */}
+                <div className="flex items-center gap-4">
+                  {/* Avatar bubble (initials) */}
+                  <div className="h-14 w-14 sm:h-16 sm:w-16 rounded-2xl bg-white/15 backdrop-blur flex items-center justify-center shadow-inner">
+                    <span className="text-xl font-bold">
+                      {displayName
+                        .split(" ")
+                        .map((p: string) => p.charAt(0))
+                        .slice(0, 2)
+                        .join("")}
                     </span>
-                  )}
-                </p>
+                  </div>
 
+                  <div>
+                    <p className="text-white/90 text-sm">{incomingCall ? "Prichádzajúci hovor" : inCall ? "Hovor" : "Pripravený"}</p>
+                    <h2 className="text-2xl sm:text-3xl font-semibold leading-tight">
+                      {incomingCall ? incomingCall.callerName : displayName}
+                    </h2>
 
-                <p className="text-xs text-stone-500 mt-1">
-                  {isFriday
-                    ? "Piatok: volanie len s piatkovými tokenmi."
-                    : "Mimo piatku: volanie je zadarmo."}
-                </p>
+                    {/* timer / status */}
+                    <div className="mt-1 flex items-center gap-2 text-white/90 text-sm">
+                      {inCall && (peerAccepted || remoteConnected) && callStartAt ? (
+                        <span className="font-mono tabular-nums px-2 py-0.5 rounded-md bg-white/10">
+                          {formatElapsed(callElapsed)}
+                        </span>
+                      ) : null}
+                      <span className="opacity-90">
+                        {incomingCall
+                          ? `Volá: ${incomingCall.callerName}`
+                          : inCall && !peerAccepted
+                          ? "Volám… Čakám na prijatie druhej strany."
+                          : inCall && peerAccepted && !remoteConnected
+                          ? "Prijaté, pripájam…"
+                          : inCall && remoteConnected
+                          ? "Prebieha hovor – pripojené."
+                          : isFriday
+                          ? "Piatok: volanie len s piatkovými tokenmi."
+                          : "Mimo piatku: volanie je zadarmo."}
+                      </span>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Animated call waves (visual "telefonuje sa" feeling) */}
+                <div className="flex items-center gap-1 h-12">
+                  <span className="w-1.5 rounded-full bg-white/70 animate-[pulse_1.4s_ease-in-out_infinite]" />
+                  <span className="w-1.5 rounded-full bg-white/60 animate-[pulse_1.6s_ease-in-out_infinite]" />
+                  <span className="w-1.5 rounded-full bg-white/50 animate-[pulse_1.8s_ease-in-out_infinite]" />
+                  <span className="w-1.5 rounded-full bg-white/40 animate-[pulse_2s_ease-in-out_infinite]" />
+                </div>
               </div>
 
-              {user?.publicMetadata.role === "client" && (
-                <button
-                  disabled={(isFriday ? fridayMinutesRemaining <= 0 : false) || inCall}
-                  className={`px-5 py-3 rounded-xl font-medium shadow transition
-                    ${
-                      (isFriday ? fridayMinutesRemaining <= 0 : false) || inCall
-                        ? "bg-stone-300 text-stone-500 cursor-not-allowed"
-                        : "bg-emerald-600 text-white hover:bg-emerald-700"
-                    }`}
-                  onClick={handleCall}
-                >
-                  Zavolať
-                </button>
-              )}
-
-              {user?.publicMetadata.role === "admin" && incomingCall && (
-                <div className="flex items-center gap-3">
-                  <div className="px-3 py-2 rounded-xl bg-amber-100 text-amber-800 font-medium">
-                    📞 Volá: {incomingCall.callerName}
-                  </div>
+              {/* Big controls (floating) */}
+              <div className="mt-6 flex flex-wrap items-center gap-3">
+                {user?.publicMetadata.role === "client" && (
                   <button
-                    className="px-5 py-3 rounded-xl bg-emerald-600 text-white font-medium shadow hover:bg-emerald-700 transition"
+                    disabled={(isFriday ? fridayMinutesRemaining <= 0 : false) || inCall}
+                    onClick={handleCall}
+                    className={`px-5 py-3 rounded-2xl font-medium shadow transition ${
+                      (isFriday ? fridayMinutesRemaining <= 0 : false) || inCall
+                        ? "bg-white/20 text-white/70 cursor-not-allowed"
+                        : "bg-white text-stone-900 hover:bg-amber-50"
+                    }`}
+                  >
+                    Zavolať
+                  </button>
+                )}
+
+                {user?.publicMetadata.role === "admin" && incomingCall && (
+                  <button
                     onClick={() => handleAccept(incomingCall.from)}
+                    className="px-5 py-3 rounded-2xl bg-white text-stone-900 font-medium shadow hover:bg-emerald-50 transition"
                   >
                     Prijať
                   </button>
-                </div>
-              )}
+                )}
 
-              {inCall && (
-                <div className="flex items-center gap-2">
-                  <button
-                    className="px-4 py-2 rounded-xl bg-emerald-600 text-white shadow hover:bg-emerald-700 transition"
-                    onClick={toggleMute}
-                  >
-                    {isMuted ? "Unmute" : "Mute"}
-                  </button>
-                  <button
-                    className="px-4 py-2 rounded-xl bg-stone-700 text-white shadow hover:bg-stone-800 transition"
-                    onClick={() => stopCall()}
-                  >
-                    Ukončiť hovor
-                  </button>
-                </div>
-              )}
+                {inCall && (
+                  <div className="flex items-center gap-2">
+                    <button
+                      onClick={toggleMute}
+                      className="px-4 py-2 rounded-xl bg-white/15 text-white shadow-inner hover:bg-white/25 transition"
+                    >
+                      {isMuted ? "Unmute" : "Mute"}
+                    </button>
+                    <button
+                      onClick={() => stopCall()}
+                      className="px-4 py-2 rounded-xl bg-stone-900/60 text-white shadow-inner hover:bg-stone-900/80 transition"
+                    >
+                      Ukončiť
+                    </button>
+                  </div>
+                )}
+              </div>
             </div>
 
-            {/* 🔈 remote audio */}
+            {/* Bottom area: device + speaker/ear controls */}
+            <div className="bg-white/80 backdrop-blur p-5 flex flex-col sm:flex-row items-center justify-between gap-4">
+              <div className="flex items-center gap-3">
+                <span className="text-stone-600 text-sm">Výstup zvuku</span>
+                {sinkSupport && audioOutputs.length > 0 ? (
+                  <select
+                    className="px-3 py-2 rounded-xl border border-stone-300 bg-white shadow-sm text-sm"
+                    value={selectedSinkId}
+                    onChange={async (e) => {
+                      setSelectedSinkId(e.target.value);
+                      await applySink(e.target.value);
+                    }}
+                  >
+                    {audioOutputs.map((o) => (
+                      <option key={o.deviceId} value={o.deviceId}>
+                        {o.label || "Audio výstup"}
+                      </option>
+                    ))}
+                  </select>
+                ) : (
+                  <span className="text-stone-500 text-sm">
+                    Prepínanie výstupu nie je v tomto prehliadači dostupné
+                  </span>
+                )}
+              </div>
+
+              {/* Speaker/Ear toggle */}
+              <div className="flex items-center gap-3">
+                <span className="text-sm text-stone-600">Reproduktor</span>
+                <button
+                  onClick={handleSpeakerToggle}
+                  className={`relative inline-flex h-7 w-14 items-center rounded-full transition ${
+                    speakerMode ? "bg-emerald-600" : "bg-stone-300"
+                  }`}
+                >
+                  <span
+                    className={`inline-block h-6 w-6 transform rounded-full bg-white shadow transition ${
+                      speakerMode ? "translate-x-7" : "translate-x-1"
+                    }`}
+                  />
+                </button>
+                <span className="text-sm text-stone-600">Pri uchu</span>
+              </div>
+            </div>
+
+            {/* hidden media element */}
             <audio ref={remoteAudioRef} autoPlay playsInline className="hidden" />
           </section>
 
