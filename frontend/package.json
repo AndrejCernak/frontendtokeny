@@ -2,13 +2,14 @@
   "name": "frontend",
   "version": "0.1.0",
   "private": true,
-   "scripts": {
+  "scripts": {
     "dev": "next dev --turbopack",
     "build": "next build --no-lint",
     "start": "next start",
     "lint": "next lint"
   },
   "dependencies": {
+    "@capacitor/core": "^7.4.3",
     "@clerk/nextjs": "^6.28.1",
     "@prisma/client": "^6.13.0",
     "firebase": "^12.0.0",

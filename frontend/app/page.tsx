@@ -18,6 +18,8 @@ import {
 import { requestFcmToken } from "@/lib/firebase";
 import { connectWS, sendWS, DEVICE_ID } from "@/lib/wsClient";
 import { attachMicToPc, createPeerConnection } from "@/lib/webrtc";
+import { setAudioRoute, enableProximity } from "../lib/speakerRoute"; // uprav cestu podľa štruktúry
+
 
 type IncomingCall = { callId: string; from: string; callerName: string };
 
@@ -383,54 +385,58 @@ async function logAudioStats(pc: RTCPeerConnection, tag: string) {
   );
 
   const stopCall = useCallback(
-    async (targetId?: string, notify = true) => {
-      try {
-        stopCallTimer(); // ✅ zastav timer
-        const id = targetId ?? peerIdRef.current ?? undefined;
-        if (id && notify) {
-          sendWSWithLog({ type: "end-call", targetId: id, callId: callIdRef.current });
-        }
+  async (targetId?: string, notify = true) => {
+    try {
+      stopCallTimer(); // ✅ zastav timer
 
-        if (pcRef.current) {
-          pcRef.current.onicecandidate = null;
-          pcRef.current.ontrack = null;
-          pcRef.current.onconnectionstatechange = null;
-          pcRef.current.getSenders().forEach((s) => s.track && s.track.stop());
-          try { pcRef.current.close(); } catch {}
-        }
-        pcRef.current = null;
-        setPc(null);
-
-        try { localStreamRef.current?.getTracks().forEach((t) => t.stop()); } catch {}
-        localStreamRef.current = null;
-
-        if (remoteAudioRef.current) {
-          try {
-            remoteAudioRef.current.srcObject = null;
-            remoteAudioRef.current.pause();
-            remoteAudioRef.current.currentTime = 0;
-          } catch {}
-        }
-
-        clearCallTimer();
-        setPendingOffer(null);
-        setIncomingCall(null);
-        setIsMuted(false);
-        setInCall(false);
-      } finally {
-        peerIdRef.current = null;
-        callIdRef.current = null;
-        await fetchFridayBalance();
+      const id = targetId ?? peerIdRef.current ?? undefined;
+      if (id && notify) {
+        sendWSWithLog({ type: "end-call", targetId: id, callId: callIdRef.current });
       }
-    if (statsTimer) {
-  clearInterval(statsTimer);
-  statsTimer = null;
-}
 
-    },
-    [fetchFridayBalance]
-    
-  );
+      if (pcRef.current) {
+        pcRef.current.onicecandidate = null;
+        pcRef.current.ontrack = null;
+        pcRef.current.onconnectionstatechange = null;
+        pcRef.current.getSenders().forEach((s) => s.track && s.track.stop());
+        try { pcRef.current.close(); } catch {}
+      }
+      pcRef.current = null;
+      setPc(null);
+
+      try { localStreamRef.current?.getTracks().forEach((t) => t.stop()); } catch {}
+      localStreamRef.current = null;
+
+      if (remoteAudioRef.current) {
+        try {
+          remoteAudioRef.current.srcObject = null;
+          remoteAudioRef.current.pause();
+          remoteAudioRef.current.currentTime = 0;
+        } catch {}
+      }
+
+      if (statsTimer) {
+        clearInterval(statsTimer);
+        statsTimer = null;
+      }
+
+      clearCallTimer();
+      setPendingOffer(null);
+      setIncomingCall(null);
+      setIsMuted(false);
+      setInCall(false);
+    } finally {
+      // vždy vypni proximity na iPhone (displej späť do normálu)
+      await enableProximity(false);
+
+      peerIdRef.current = null;
+      callIdRef.current = null;
+
+      await fetchFridayBalance();
+    }
+  },
+  [fetchFridayBalance]
+);
 
   type TransceiverDirWritable = RTCRtpTransceiver & {
     setDirection?: (dir: RTCRtpTransceiverDirection) => void;
@@ -531,6 +537,12 @@ async function logAudioStats(pc: RTCPeerConnection, tag: string) {
 
         setPendingOffer(null);
         setInCall(true);
+         // >>> iOS audio routing: hneď po prijatí hovoru pošli zvuk do slúchadla pri uchu
+        try {
+          await setAudioRoute("earpiece");   // iOS: earpiece (pri uchu)
+          await enableProximity(true);       // zapni proximity (zhasne displej pri uchu)
+        } catch {}
+
         if (statsTimer) clearInterval(statsTimer);
         statsTimer = setInterval(() => {
           if (pcRef.current) logAudioStats(pcRef.current, "ADMIN");
@@ -1092,6 +1104,14 @@ async function logAudioStats(pc: RTCPeerConnection, tag: string) {
                   </button>
                 </div>
               )}
+
+                <button onClick={() => { setAudioRoute("speaker"); enableProximity(false); }}>
+                  Hlasný reproduktor
+                </button>
+
+                <button onClick={() => { setAudioRoute("earpiece"); enableProximity(true); }}>
+                  Pri uchu
+                </button>
 
               {inCall && (
                 <div className="flex items-center gap-2">
