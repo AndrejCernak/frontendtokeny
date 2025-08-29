@@ -7,6 +7,7 @@ import {
   SignInButton,
   UserButton,
 } from "@clerk/nextjs";
+
 import { useAuth } from "@clerk/nextjs";
 import {
   useEffect,
@@ -1028,8 +1029,10 @@ async function logAudioStats(pc: RTCPeerConnection, tag: string) {
           </div>
           <div className="flex items-center gap-3">
             <SignedOut>
-              <SignInButton />
+              <SignInButton mode="modal" />
             </SignedOut>
+
+
             <SignedIn>
               <UserButton />
             </SignedIn>
