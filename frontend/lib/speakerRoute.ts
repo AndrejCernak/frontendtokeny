@@ -1,54 +1,44 @@
 // lib/speakerRoute.ts
-import { Capacitor, registerPlugin } from "@capacitor/core";
+import { registerPlugin, Capacitor } from '@capacitor/core';
 
-type Route = "speaker" | "earpiece";
-type Result<T> = { ok: true; data: T } | { ok: false; error: string };
+export interface SpeakerRoutePlugin {
+  setAudioRoute(options: { route: 'speaker' | 'earpiece' }): Promise<{
+    success: boolean;
+    route: string;
+  }>;
 
-type SpeakerRoutePlugin = {
-  setAudioRoute(options: { route: Route }): Promise<{ success: boolean; route?: Route }>;
-  enableProximity(options: { enabled: boolean }): Promise<{ success: boolean; enabled: boolean }>;
-};
+  enableProximity(options: { enabled: boolean }): Promise<{
+    success: boolean;
+    enabled: boolean;
+  }>;
 
-// Pozn.: registerPlugin existuje aj na webe, ale volanie metód v browsri vyhodí „plugin not implemented“.
-// Preto si to ošetríme.
-const Native = Capacitor.isNativePlatform()
-  ? registerPlugin<SpeakerRoutePlugin>("SpeakerRoute")
-  : null;
-
-export async function setAudioRoute(route: Route): Promise<Result<{ route?: Route }>> {
-  try {
-    if (!Capacitor.isNativePlatform()) {
-      return { ok: false, error: "Not running in native app (web/PWA)" };
-    }
-    if (!Native) {
-      return { ok: false, error: "Plugin object missing" };
-    }
-    const res = await Native.setAudioRoute({ route });
-    return res?.success ? { ok: true, data: { route: res.route } } : { ok: false, error: "Native returned success=false" };
-  } catch (e: any) {
-    // typická hláška: "plugin not implemented"
-    return { ok: false, error: String(e?.message || e) };
-  }
+  ping(): Promise<{ success: boolean }>;
 }
 
-export async function enableProximity(enabled: boolean): Promise<Result<{ enabled: boolean }>> {
-  try {
-    if (!Capacitor.isNativePlatform()) {
-      return { ok: false, error: "Not running in native app (web/PWA)" };
-    }
-    if (!Native) {
-      return { ok: false, error: "Plugin object missing" };
-    }
-    const res = await Native.enableProximity({ enabled });
-    return res?.success ? { ok: true, data: { enabled: !!res.enabled } } : { ok: false, error: "Native returned success=false" };
-  } catch (e: any) {
-    return { ok: false, error: String(e?.message || e) };
+// plugin registrácia
+export const SpeakerRoute = registerPlugin<SpeakerRoutePlugin>('SpeakerRoute');
+
+// helper funkcie ak chceš volať jednoducho
+export async function setAudioRoute(route: 'speaker' | 'earpiece') {
+  if (!Capacitor.isNativePlatform()) {
+    console.warn('[SpeakerRoute] Not native, skipping setAudioRoute');
+    return { success: false, route };
   }
+  return SpeakerRoute.setAudioRoute({ route });
 }
 
-export function getCapInfo() {
-  return {
-    isNative: Capacitor.isNativePlatform(),
-    platform: Capacitor.getPlatform?.() || "unknown",
-  };
+export async function enableProximity(enabled: boolean) {
+  if (!Capacitor.isNativePlatform()) {
+    console.warn('[SpeakerRoute] Not native, skipping enableProximity');
+    return { success: false, enabled };
+  }
+  return SpeakerRoute.enableProximity({ enabled });
+}
+
+export async function ping() {
+  if (!Capacitor.isNativePlatform()) {
+    console.warn('[SpeakerRoute] Not native, skipping ping');
+    return { success: false };
+  }
+  return SpeakerRoute.ping();
 }
