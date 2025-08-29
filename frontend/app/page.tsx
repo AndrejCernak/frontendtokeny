@@ -21,6 +21,8 @@ import { connectWS, sendWS, DEVICE_ID } from "@/lib/wsClient";
 import { attachMicToPc, createPeerConnection } from "@/lib/webrtc";
 import { setAudioRoute, enableProximity } from "../lib/speakerRoute"; // uprav cestu podľa štruktúry
 
+import { getCapInfo } from "../lib/speakerRoute";
+
 
 type IncomingCall = { callId: string; from: string; callerName: string };
 
@@ -101,12 +103,10 @@ function stopCallTimer() {
 
 
 const [debug, setDebug] = useState<string[]>([]);
-function log(msg: any) {
-  const s = typeof msg === "string" ? msg : JSON.stringify(msg);
-  setDebug(d => [...d.slice(-20), s]);
-  console.log(s);
+function pushLog(label: string, payload?: any) {
+  const line = payload ? `${label}: ${JSON.stringify(payload)}` : label;
+  setDebug(d => [...d.slice(-20), line]);
 }
-
 
 const isiOS = typeof navigator !== "undefined" && /iP(hone|ad|od)/.test(navigator.userAgent);
 const isStandalone =
@@ -1139,23 +1139,33 @@ async function logAudioStats(pc: RTCPeerConnection, tag: string) {
               )}
 
                 
-                <button
-                className="px-5 py-3 rounded-xl bg-emerald-600 text-white font-medium shadow hover:bg-emerald-700 transition"
-                 onClick={() => {
-  log("Klikol som na speaker");
-  setAudioRoute("speaker").then(res => log(res));
-  enableProximity(false).then(res => log(res));
-}}
+             <button
+  onClick={async () => {
+    const info = getCapInfo();
+    pushLog("CLICK speaker");
+    pushLog("Capacitor", info);
+    const r1 = await setAudioRoute("speaker");
+    pushLog("setAudioRoute(speaker)", r1);
+    const r2 = await enableProximity(false);
+    pushLog("enableProximity(false)", r2);
+  }}
 >
-                  Hlasný reproduktor
-                </button>
+  Hlasný reproduktor
+</button>
 
-                
-                <button 
-                className="px-5 py-3 rounded-xl bg-emerald-600 text-white font-medium shadow hover:bg-emerald-700 transition"
-                onClick={() => { setAudioRoute("earpiece"); enableProximity(true); }}>
-                  Pri uchu
-                </button>
+<button
+  onClick={async () => {
+    const info = getCapInfo();
+    pushLog("CLICK earpiece");
+    pushLog("Capacitor", info);
+    const r1 = await setAudioRoute("earpiece");
+    pushLog("setAudioRoute(earpiece)", r1);
+    const r2 = await enableProximity(true);
+    pushLog("enableProximity(true)", r2);
+  }}
+>
+  Pri uchu
+</button>
 
               {inCall && (
                 <div className="flex items-center gap-2">
@@ -1175,12 +1185,9 @@ async function logAudioStats(pc: RTCPeerConnection, tag: string) {
               )}
             </div>
 
-            <div className="fixed bottom-0 left-0 w-full max-h-40 overflow-y-auto bg-black text-green-400 text-xs p-2 font-mono z-50">
-  {debug.map((line, i) => (
-    <div key={i}>{line}</div>
-  ))}
+  <div className="fixed bottom-0 left-0 right-0 max-h-44 overflow-y-auto bg-black/90 text-green-400 text-[10px] p-2 font-mono z-50">
+  {debug.map((l, i) => (<div key={i}>{l}</div>))}
 </div>
-
             {/* 🔈 remote audio */}
             <audio ref={remoteAudioRef} autoPlay playsInline className="hidden" />
           </section>
