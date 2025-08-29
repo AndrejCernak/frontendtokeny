@@ -100,6 +100,13 @@ function stopCallTimer() {
 }
 
 
+const [debug, setDebug] = useState<string[]>([]);
+function log(msg: any) {
+  const s = typeof msg === "string" ? msg : JSON.stringify(msg);
+  setDebug(d => [...d.slice(-20), s]);
+  console.log(s);
+}
+
 
 const isiOS = typeof navigator !== "undefined" && /iP(hone|ad|od)/.test(navigator.userAgent);
 const isStandalone =
@@ -1134,7 +1141,12 @@ async function logAudioStats(pc: RTCPeerConnection, tag: string) {
                 
                 <button
                 className="px-5 py-3 rounded-xl bg-emerald-600 text-white font-medium shadow hover:bg-emerald-700 transition"
-                 onClick={() => { setAudioRoute("speaker"); enableProximity(false); }}>
+                 onClick={() => {
+  log("Klikol som na speaker");
+  setAudioRoute("speaker").then(res => log(res));
+  enableProximity(false).then(res => log(res));
+}}
+>
                   Hlasný reproduktor
                 </button>
 
@@ -1162,6 +1174,12 @@ async function logAudioStats(pc: RTCPeerConnection, tag: string) {
                 </div>
               )}
             </div>
+
+            <div className="fixed bottom-0 left-0 w-full max-h-40 overflow-y-auto bg-black text-green-400 text-xs p-2 font-mono z-50">
+  {debug.map((line, i) => (
+    <div key={i}>{line}</div>
+  ))}
+</div>
 
             {/* 🔈 remote audio */}
             <audio ref={remoteAudioRef} autoPlay playsInline className="hidden" />

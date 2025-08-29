@@ -1,20 +1,30 @@
-import { Capacitor } from "@capacitor/core";
+import { registerPlugin } from "@capacitor/core";
 
-type Route = "earpiece" | "speaker";
+type SpeakerRoutePlugin = {
+  setAudioRoute(options: { route: "earpiece" | "speaker" }): Promise<{ success: boolean; route: string }>;
+  enableProximity(options: { enabled: boolean }): Promise<{ success: boolean; enabled: boolean }>;
+};
 
-/** Prepne zvuk v iOS appke – funguje iba v natívnej iOS Capacitor appke. */
-export async function setAudioRoute(route: Route) {
-  if (!Capacitor.isNativePlatform()) {
-    // bežíš v prehliadači/PWA → nič sa nestane
-    return { success: false, webFallback: true };
+const plugin = registerPlugin<SpeakerRoutePlugin>("SpeakerRoute");
+
+export async function setAudioRoute(route: "earpiece" | "speaker") {
+  console.log("[FE] Calling setAudioRoute", route);
+  try {
+    const res = await plugin.setAudioRoute({ route });
+    console.log("[FE] setAudioRoute result", res);
+    return res;
+  } catch (err) {
+    console.error("[FE] setAudioRoute ERROR", err);
   }
-  // @ts-ignore – vlastný Capacitor plugin
-  return await (window as any).Capacitor.Plugins.SpeakerRoute.setRoute({ route });
 }
 
-/** Voliteľné: proximity senzor pri uchu (zhasne displej). */
 export async function enableProximity(enabled: boolean) {
-  if (!Capacitor.isNativePlatform()) return;
-  // @ts-ignore
-  return await (window as any).Capacitor.Plugins.SpeakerRoute.enableProximity({ enabled });
+  console.log("[FE] Calling enableProximity", enabled);
+  try {
+    const res = await plugin.enableProximity({ enabled });
+    console.log("[FE] enableProximity result", res);
+    return res;
+  } catch (err) {
+    console.error("[FE] enableProximity ERROR", err);
+  }
 }
