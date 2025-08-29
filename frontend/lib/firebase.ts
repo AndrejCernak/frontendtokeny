@@ -1,5 +1,5 @@
-import { initializeApp } from "firebase/app";
-import { getMessaging, getToken } from "firebase/messaging";
+// lib/firebase.ts
+import { initializeApp, type FirebaseApp } from "firebase/app";
 
 const firebaseConfig = {
   apiKey: process.env.NEXT_PUBLIC_FIREBASE_API_KEY,
@@ -10,44 +10,39 @@ const firebaseConfig = {
   appId: process.env.NEXT_PUBLIC_FIREBASE_APP_ID,
 };
 
-const app = initializeApp(firebaseConfig);
+let app: FirebaseApp | null = null;
+function getApp(): FirebaseApp {
+  if (!app) app = initializeApp(firebaseConfig);
+  return app!;
+}
 
-/**
- * Bezpečne vytvorí messaging len ak bežíme v prehliadači,
- * a len ak daná platforma podporuje service workers + push.
- */
-function createMessaging() {
+/** Zistí bezpečne podporu Web Push (iOS Safari v tabu = false, PWA na ploche = true). */
+async function getMessagingIfSupported() {
   if (typeof window === "undefined") return null;
 
-  const isIos = /iP(hone|ad|od)/.test(navigator.userAgent);
-  const isStandalone =
-    window.matchMedia?.("(display-mode: standalone)")?.matches ||
-    (navigator as any).standalone === true;
-
-  // iOS podporuje web push len ak je to PWA (standalone)
-  if (isIos && !isStandalone) return null;
-
-  // ostatné browsery: musí existovať serviceWorker a PushManager
-  if (!("serviceWorker" in navigator) || !(window as any).PushManager) {
-    return null;
-  }
-
   try {
-    return getMessaging(app);
+    const { isSupported, getMessaging } = await import("firebase/messaging");
+    const supported = await isSupported();
+    if (!supported) return null;
+    if (!("Notification" in window)) return null;
+    if (!("serviceWorker" in navigator)) return null;
+
+    return getMessaging(getApp());
   } catch (err) {
-    console.warn("Firebase messaging init error:", err);
+    console.warn("Messaging not available:", err);
     return null;
   }
 }
 
-export const messaging = createMessaging();
-
 export const requestFcmToken = async () => {
+  const messaging = await getMessagingIfSupported();
   if (!messaging) return null;
+
   try {
-    return await getToken(messaging, {
-      vapidKey: process.env.NEXT_PUBLIC_FIREBASE_VAPID_KEY,
-    });
+    const { getToken } = await import("firebase/messaging");
+    const vapidKey = process.env.NEXT_PUBLIC_FIREBASE_VAPID_KEY;
+    if (!vapidKey) return null;
+    return await getToken(messaging, { vapidKey });
   } catch (error) {
     console.error("FCM token error:", error);
     return null;

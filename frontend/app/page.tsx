@@ -52,12 +52,19 @@ export default function HomePage() {
   const [, setPc] = useState<RTCPeerConnection | null>(null);
   const pcRef = useRef<RTCPeerConnection | null>(null);
   const [hasNotifications, setHasNotifications] = useState<boolean>(() => {
-    if (typeof window === "undefined") return false;
+  if (typeof window === "undefined") return false;
+  // iOS WebView/Safari tabu môže nemať Notification vôbec
+  if (!("Notification" in window)) return false;
+  try {
     return (
       Notification.permission === "granted" ||
       localStorage.getItem("fcm-enabled") === "1"
     );
-  });
+  } catch {
+    return false;
+  }
+});
+
   const [isMuted, setIsMuted] = useState(false);
   const [inCall, setInCall] = useState(false);
 
@@ -934,12 +941,12 @@ async function logAudioStats(pc: RTCPeerConnection, tag: string) {
   const autoRegisterPush = async () => {
     if (!isSignedIn || !user) return;
 
-    // iOS Safari nepodporuje Web Push pre “bežnú” URL (iba pre PWA)
-    if (isiOS && !isStandalone) return;
-
+    // Bezpečnostné guardy – ak Notification nie je k dispozícii, nerob nič
+    if (!("Notification" in window)) return;
     if (Notification.permission !== "granted") return;
+
     try {
-      const token = await requestFcmToken();    // ← volanie Firebase messaging
+      const token = await requestFcmToken();
       if (!token) return;
       const role = (user.publicMetadata.role as string) || "client";
       const jwt = await getToken();
@@ -954,52 +961,60 @@ async function logAudioStats(pc: RTCPeerConnection, tag: string) {
       });
 
       setHasNotifications(true);
-      if (typeof window !== "undefined") localStorage.setItem("fcm-enabled", "1");
-    } catch {}
+      localStorage.setItem("fcm-enabled", "1");
+    } catch (e) {
+      console.error("FCM auto register error:", e);
+    }
   };
   autoRegisterPush();
 }, [isSignedIn, user, backend, getToken]);
 
 
-  const handleEnableNotifications = useCallback(async () => {
-    try {
-      const permission = await Notification.requestPermission();
-      if (permission !== "granted") {
-        alert("Notifikácie neboli povolené.");
-        return;
-      }
-      const token = await requestFcmToken();
-      if (!token || !user) {
-        alert("Nepodarilo sa získať FCM token.");
-        return;
-      }
-      const role = (user.publicMetadata.role as string) || "client";
-      const jwt = await getToken();
 
-      const res = await fetch(`${backend}/register-fcm`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${jwt}`,
-        },
-        body: JSON.stringify({
-          fcmToken: token,
-          role,
-          platform: "web",
-        }),
-      });
-      if (res.ok) {
-        setHasNotifications(true);
-        if (typeof window !== "undefined") localStorage.setItem("fcm-enabled", "1");
-        alert("Notifikácie boli povolené ✅");
-      } else {
-        alert("Chyba pri registrácii tokenu.");
-      }
-    } catch (err) {
-      console.error("FCM chyba:", err);
-      alert("Nastala chyba pri nastavovaní notifikácií.");
+  const handleEnableNotifications = useCallback(async () => {
+  try {
+    if (!("Notification" in window)) {
+      alert("Tento prehliadač nepodporuje web push notifikácie.");
+      return;
     }
-  }, [backend, user, getToken]);
+
+    const permission = await Notification.requestPermission();
+    if (permission !== "granted") {
+      alert("Notifikácie neboli povolené.");
+      return;
+    }
+
+    const token = await requestFcmToken(); // bezpečné, vracia null ak nepodporované
+    if (!token || !user) {
+      alert("Nepodarilo sa získať FCM token (prehliadač to asi nepodporuje).");
+      return;
+    }
+
+    const role = (user.publicMetadata.role as string) || "client";
+    const jwt = await getToken();
+
+    const res = await fetch(`${backend}/register-fcm`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${jwt}`,
+      },
+      body: JSON.stringify({ fcmToken: token, role, platform: "web" }),
+    });
+
+    if (res.ok) {
+      setHasNotifications(true);
+      localStorage.setItem("fcm-enabled", "1");
+      alert("Notifikácie boli povolené ✅");
+    } else {
+      alert("Chyba pri registrácii tokenu.");
+    }
+  } catch (err) {
+    console.error("FCM chyba:", err);
+    alert("Nastala chyba pri nastavovaní notifikácií.");
+  }
+}, [backend, user, getToken]);
+
 
   return (
     <main className="min-h-screen bg-gradient-to-br from-stone-100 via-emerald-50 to-amber-50 text-stone-800">
