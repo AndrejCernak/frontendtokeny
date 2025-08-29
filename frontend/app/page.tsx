@@ -92,6 +92,13 @@ function stopCallTimer() {
 }
 
 
+
+const isiOS = typeof navigator !== "undefined" && /iP(hone|ad|od)/.test(navigator.userAgent);
+const isStandalone =
+  typeof window !== "undefined" &&
+  (window.matchMedia?.("(display-mode: standalone)")?.matches ||
+   (navigator as any).standalone === true);
+
   // ——— Balances
   const [fridayMinutesRemaining, setFridayMinutesRemaining] = useState<number>(0);
   const isFriday = useMemo(() => isFridayInBratislava(), []);
@@ -924,34 +931,35 @@ async function logAudioStats(pc: RTCPeerConnection, tag: string) {
 
   // ===== Auto-register push on app start when already granted =====
   useEffect(() => {
-    const autoRegisterPush = async () => {
-      if (!isSignedIn || !user) return;
-      if (Notification.permission !== "granted") return;
-      try {
-        const token = await requestFcmToken();
-        if (!token) return;
-        const role = (user.publicMetadata.role as string) || "client";
-        const jwt = await getToken();
+  const autoRegisterPush = async () => {
+    if (!isSignedIn || !user) return;
 
-        await fetch(`${backend}/register-fcm`, {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            Authorization: `Bearer ${jwt}`,
-          },
-          body: JSON.stringify({
-            fcmToken: token,
-            role,
-            platform: "web",
-          }),
-        });
+    // iOS Safari nepodporuje Web Push pre “bežnú” URL (iba pre PWA)
+    if (isiOS && !isStandalone) return;
 
-        setHasNotifications(true);
-        if (typeof window !== "undefined") localStorage.setItem("fcm-enabled", "1");
-      } catch {}
-    };
-    autoRegisterPush();
-  }, [isSignedIn, user, backend, getToken]);
+    if (Notification.permission !== "granted") return;
+    try {
+      const token = await requestFcmToken();    // ← volanie Firebase messaging
+      if (!token) return;
+      const role = (user.publicMetadata.role as string) || "client";
+      const jwt = await getToken();
+
+      await fetch(`${backend}/register-fcm`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${jwt}`,
+        },
+        body: JSON.stringify({ fcmToken: token, role, platform: "web" }),
+      });
+
+      setHasNotifications(true);
+      if (typeof window !== "undefined") localStorage.setItem("fcm-enabled", "1");
+    } catch {}
+  };
+  autoRegisterPush();
+}, [isSignedIn, user, backend, getToken]);
+
 
   const handleEnableNotifications = useCallback(async () => {
     try {
