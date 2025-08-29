@@ -1105,11 +1105,17 @@ async function logAudioStats(pc: RTCPeerConnection, tag: string) {
                 </div>
               )}
 
-                <button onClick={() => { setAudioRoute("speaker"); enableProximity(false); }}>
+                
+                <button
+                className="px-5 py-3 rounded-xl bg-emerald-600 text-white font-medium shadow hover:bg-emerald-700 transition"
+                 onClick={() => { setAudioRoute("speaker"); enableProximity(false); }}>
                   Hlasný reproduktor
                 </button>
 
-                <button onClick={() => { setAudioRoute("earpiece"); enableProximity(true); }}>
+                
+                <button 
+                className="px-5 py-3 rounded-xl bg-emerald-600 text-white font-medium shadow hover:bg-emerald-700 transition"
+                onClick={() => { setAudioRoute("earpiece"); enableProximity(true); }}>
                   Pri uchu
                 </button>
 
