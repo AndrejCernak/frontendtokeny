@@ -1,26 +1,39 @@
-import { registerPlugin, Capacitor } from "@capacitor/core";
+import { registerPlugin, Capacitor } from '@capacitor/core';
 
 type AudioRoutePlugin = {
-  setRoute(options: { route: "speaker" | "earpiece" }): Promise<{ ok: boolean }>;
+  setRoute(options: { route: 'speaker' | 'earpiece' }): Promise<{ ok: boolean }>;
   enableProximity(options: { enable: boolean }): Promise<{ ok: boolean; enabled: boolean }>;
 };
 
-const AudioRoute = registerPlugin<AudioRoutePlugin>("AudioRoute");
+// registrácia pluginu
+const AudioRoute = registerPlugin<AudioRoutePlugin>('AudioRoute');
 
-export async function setAudioRoute(route: "speaker" | "earpiece") {
-  if (!Capacitor.isNativePlatform()) return { ok: false as const };
+// sprístupnenie do Safari konzoly (Develop → iPhone → App)
+if (typeof window !== 'undefined') {
+  (window as any).AudioRoute = AudioRoute;
+}
+
+const isIOS = Capacitor.getPlatform?.() === 'ios';
+
+// helper na prepnutie audio routingu
+export async function setAudioRoute(route: 'speaker' | 'earpiece') {
+  if (!isIOS) return { ok: false as const };
   return AudioRoute.setRoute({ route });
 }
 
+// helper na zapnutie / vypnutie proximity senzora
 export async function enableProximity(enable: boolean) {
-  if (!Capacitor.isNativePlatform()) return { ok: false as const, enabled: false };
+  if (!isIOS) return { ok: false as const, enabled: false };
   return AudioRoute.enableProximity({ enable });
 }
 
-// voliteľné – info helper
+// helper na debug info
 export function getCapInfo() {
   return {
-    isNative: Capacitor.isNativePlatform(),
-    platform: (window as any).Capacitor?.getPlatform?.(),
+    isNative: Capacitor.isNativePlatform?.(),
+    platform: Capacitor.getPlatform?.(),
   };
 }
+
+// voliteľný export pre použitie priamo
+export { AudioRoute };
