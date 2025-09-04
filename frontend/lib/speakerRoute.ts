@@ -1,44 +1,26 @@
-// lib/speakerRoute.ts
-import { registerPlugin, Capacitor } from '@capacitor/core';
+import { registerPlugin, Capacitor } from "@capacitor/core";
 
-export interface SpeakerRoutePlugin {
-  setAudioRoute(options: { route: 'speaker' | 'earpiece' }): Promise<{
-    success: boolean;
-    route: string;
-  }>;
+type AudioRoutePlugin = {
+  setRoute(options: { route: "speaker" | "earpiece" }): Promise<{ ok: boolean }>;
+  enableProximity(options: { enable: boolean }): Promise<{ ok: boolean; enabled: boolean }>;
+};
 
-  enableProximity(options: { enabled: boolean }): Promise<{
-    success: boolean;
-    enabled: boolean;
-  }>;
+const AudioRoute = registerPlugin<AudioRoutePlugin>("AudioRoute");
 
-  ping(): Promise<{ success: boolean }>;
+export async function setAudioRoute(route: "speaker" | "earpiece") {
+  if (!Capacitor.isNativePlatform()) return { ok: false as const };
+  return AudioRoute.setRoute({ route });
 }
 
-// plugin registrácia
-export const SpeakerRoute = registerPlugin<SpeakerRoutePlugin>('SpeakerRoute');
-
-// helper funkcie ak chceš volať jednoducho
-export async function setAudioRoute(route: 'speaker' | 'earpiece') {
-  if (!Capacitor.isNativePlatform()) {
-    console.warn('[SpeakerRoute] Not native, skipping setAudioRoute');
-    return { success: false, route };
-  }
-  return SpeakerRoute.setAudioRoute({ route });
+export async function enableProximity(enable: boolean) {
+  if (!Capacitor.isNativePlatform()) return { ok: false as const, enabled: false };
+  return AudioRoute.enableProximity({ enable });
 }
 
-export async function enableProximity(enabled: boolean) {
-  if (!Capacitor.isNativePlatform()) {
-    console.warn('[SpeakerRoute] Not native, skipping enableProximity');
-    return { success: false, enabled };
-  }
-  return SpeakerRoute.enableProximity({ enabled });
-}
-
-export async function ping() {
-  if (!Capacitor.isNativePlatform()) {
-    console.warn('[SpeakerRoute] Not native, skipping ping');
-    return { success: false };
-  }
-  return SpeakerRoute.ping();
+// voliteľné – info helper
+export function getCapInfo() {
+  return {
+    isNative: Capacitor.isNativePlatform(),
+    platform: (window as any).Capacitor?.getPlatform?.(),
+  };
 }
