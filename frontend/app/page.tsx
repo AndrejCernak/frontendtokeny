@@ -19,7 +19,7 @@ import {
 import { requestFcmToken } from "@/lib/firebase";
 import { connectWS, sendWS, DEVICE_ID } from "@/lib/wsClient";
 import { attachMicToPc, createPeerConnection } from "@/lib/webrtc";
-import { setAudioRoute, enableProximity, ping } from "@/lib/speakerRoute";
+import { setAudioRoute, enableProximity} from "@/lib/speakerRoute";
 import { Capacitor } from "@capacitor/core";
 
 
@@ -1172,24 +1172,6 @@ async function logAudioStats(pc: RTCPeerConnection, tag: string) {
 >
   Pri uchu
 </button>
-
-              <button
-  onClick={async () => {
-    const info = getCapInfo();
-    pushLog("Capacitor info", info);
-    try {
-      const r = await ping();
-      pushLog("ping()", r);
-    } catch (e:any) {
-      pushLog("ping error", e?.message || String(e));
-    }
-  }}
-  className="px-4 py-2 rounded-xl bg-stone-200"
->
-  Test plugin (ping)
-</button>
-
-
               {inCall && (
                 <div className="flex items-center gap-2">
                   <button
