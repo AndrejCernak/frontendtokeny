@@ -23,13 +23,6 @@ import { setAudioRoute, enableProximity} from "@/lib/speakerRoute";
 import { Capacitor } from "@capacitor/core";
 
 
-const getCapInfo = () => ({
-  platform: Capacitor.getPlatform(),
-  isNative: Capacitor.isNativePlatform(),
-  plugins: Object.keys((window as any)?.Capacitor?.Plugins ?? {}),
-});
-
-
 type IncomingCall = { callId: string; from: string; callerName: string };
 
 function isFridayInBratislava(d = new Date()) {
@@ -1145,33 +1138,30 @@ async function logAudioStats(pc: RTCPeerConnection, tag: string) {
               )}
 
                 
- <button
+<button
   onClick={async () => {
-    const info = getCapInfo();
-    pushLog("CLICK speaker");
-    pushLog("Capacitor", info);
-    const r1 = await setAudioRoute("speaker");
-    pushLog("setAudioRoute(speaker)", r1);
-    const r2 = await enableProximity(false);
-    pushLog("enableProximity(false)", r2);
+    try {
+      await setAudioRoute("speaker");   // veľký spodný reprák
+      await enableProximity(false);     // vypnúť proximity (displej ostáva zapnutý)
+    } catch {}
   }}
+  className="px-4 py-2 rounded-xl bg-stone-800 text-white"
 >
   Hlasný reproduktor
 </button>
 
 <button
   onClick={async () => {
-    const info = getCapInfo();
-    pushLog("CLICK earpiece");
-    pushLog("Capacitor", info);
-    const r1 = await setAudioRoute("earpiece");
-    pushLog("setAudioRoute(earpiece)", r1);
-    const r2 = await enableProximity(true);
-    pushLog("enableProximity(true)", r2);
+    try {
+      await setAudioRoute("earpiece");  // horné slúchadlo pri uchu
+      await enableProximity(true);      // zapnúť proximity (pri uchu zhasne displej)
+    } catch {}
   }}
+  className="px-4 py-2 rounded-xl bg-stone-600 text-white"
 >
   Pri uchu
 </button>
+
               {inCall && (
                 <div className="flex items-center gap-2">
                   <button
